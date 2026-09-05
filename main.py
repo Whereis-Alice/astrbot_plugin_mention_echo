@@ -29,11 +29,9 @@ if __package__:
         LOG_TAG,
         PLUGIN_NAME,
         QUERY_PATTERN,
+        QUERY_RECENT_MAX,
         RANK_PATTERN,
         RANK_TOP_N,
-        RECAP_DEFAULT_COUNT,
-        RECAP_MAX_COUNT,
-        RECAP_PATTERN,
         REMINDER_CONTEXT_OFF_PATTERN,
         REMINDER_CONTEXT_ON_PATTERN,
         REMINDER_CONTEXT_SET_PATTERN,
@@ -68,11 +66,9 @@ else:
         LOG_TAG,
         PLUGIN_NAME,
         QUERY_PATTERN,
+        QUERY_RECENT_MAX,
         RANK_PATTERN,
         RANK_TOP_N,
-        RECAP_DEFAULT_COUNT,
-        RECAP_MAX_COUNT,
-        RECAP_PATTERN,
         REMINDER_CONTEXT_OFF_PATTERN,
         REMINDER_CONTEXT_ON_PATTERN,
         REMINDER_CONTEXT_SET_PATTERN,
@@ -352,8 +348,9 @@ class MentionEchoPlugin(
         if HELP_PATTERN.match(stripped):
             return await self._help(event)
 
-        if QUERY_PATTERN.match(stripped):
-            return await self._query(event, group_id, stripped, mentions)
+        query_match = QUERY_PATTERN.match(stripped)
+        if query_match:
+            return await self._query(event, group_id, stripped, mentions, query_match)
 
         if CLEAR_PATTERN.match(stripped):
             return [await self._clear_self(event, group_id)]
@@ -427,10 +424,6 @@ class MentionEchoPlugin(
                 return [event.plain_result("艾特排行榜已在插件配置中关闭。")]
             return await self._rank(event, group_id, rank_match)
 
-        recap_match = RECAP_PATTERN.match(stripped)
-        if recap_match:
-            return await self._recap(event, group_id, recap_match)
-
         if STORAGE_PATTERN.match(stripped):
             if not self._is_admin(event):
                 return [event.plain_result("只有群管或主人可以查看存储状态哦")]
@@ -464,7 +457,6 @@ class MentionEchoPlugin(
                 REMINDER_CONTEXT_OFF_PATTERN,
                 REMINDER_CONTEXT_SET_PATTERN,
                 RANK_PATTERN,
-                RECAP_PATTERN,
                 STORAGE_PATTERN,
                 CLEANUP_PATTERN,
             )
@@ -1056,9 +1048,9 @@ class MentionEchoPlugin(
             {
                 "title": "查询",
                 "items": [
-                    {"command": "谁艾特我", "desc": "查看最近谁在本群艾特过你。"},
+                    {"command": "谁艾特我", "desc": "查看最近谁在本群艾特过你（全部记录，多了自动分页）。"},
+                    {"command": "谁艾特我 3", "desc": "久没看群时补课：只看最近 3 次艾特，可连带当时的群聊记录。"},
                     {"command": "谁艾特他 @某人", "desc": "查看指定成员被谁艾特过。"},
-                    {"command": "艾特回顾 / 艾特回顾 3", "desc": "久没看群时补课：最近几次艾特连带当时的群聊上下文。"},
                     {"command": "艾特帮助", "desc": "渲染本帮助图。"},
                 ],
             },
@@ -1162,6 +1154,7 @@ class MentionEchoPlugin(
         *,
         title: str = "",
         limit: int = 80,
+        context_mode: str = "auto",
     ) -> bool:
         group_id = self._group_id(event)
         if not group_id or not records:
@@ -1170,7 +1163,7 @@ class MentionEchoPlugin(
         bot_name = await self._bot_name(event, group_id)
         bot_uin = self._numeric_id(self_id)
         nodes: list[dict[str, Any]] = []
-        messages = self._forward_timeline_messages(records, target_name)
+        messages = self._forward_timeline_messages(records, target_name, context_mode=context_mode)
         if title.strip():
             title_time = self._forward_node_time(messages[0]) if messages else 0
             nodes.append(self._forward_text_node(bot_name, bot_uin, title.strip(), time_value=title_time))
@@ -1214,8 +1207,10 @@ class MentionEchoPlugin(
         self,
         records: list[dict[str, Any]],
         target_name: str,
+        *,
+        context_mode: str = "auto",
     ) -> list[dict[str, Any]]:
-        blocks = self._build_blocks(records, target_name, reverse=False)
+        blocks = self._build_blocks(records, target_name, reverse=False, context_mode=context_mode)
         messages: list[dict[str, Any]] = []
         for block in blocks:
             for msg in block.get("msgs") or []:
@@ -1324,7 +1319,15 @@ class MentionEchoPlugin(
         group_id: str,
         text: str,
         mentions: list[str],
+        match: re.Match[str] | None = None,
     ) -> list[Any]:
+        """唯一的查询入口。
+
+        不带条数就是原来的「谁艾特我」：全部记录、分页出图、先回一句等待提示。
+        带条数（``谁艾特我 3``，或配置了 ``query_recent_count``）就是「补课视图」：
+        只看最近 N 次艾特，等待提示换成一行摘要，和图片一起发出去。
+        上下文带不带由 ``query_context_mode`` 决定，跟提醒路径互不影响。
+        """
         target = self._query_target(event, text, mentions)
         if not target:
             return [event.plain_result("请在命令里 @ 要查询的人")]
@@ -1338,37 +1341,59 @@ class MentionEchoPlugin(
 
         target_name = await self._target_name(event, group_id, target)
         total_records = len(records)
+        recent = self._query_recent_limit(match)
+        context_mode = self._query_context_mode()
         query_reverse = self._query_reverse_order()
         text_only = self._render_text_only()
-        records = self._select_query_records(records, target_name, target, reverse=False if text_only else query_reverse)
+
+        if recent > 0:
+            records = sorted(records, key=self._record_sort_key, reverse=True)[:recent]
+            lead_text = self._query_recap_summary(records, total_records, context_mode)
+        else:
+            lead_text = await self._query_waiting_text(event, group_id, target, target_name)
+        # 全量查询时先回一句「稍等」；只看最近 N 次时摘要和图一起发，省一条消息。
+        send_lead_first = recent <= 0
+
+        records = self._select_query_records(
+            records,
+            target_name,
+            target,
+            reverse=False if text_only else query_reverse,
+            context_mode=context_mode,
+        )
         records = await self._resolve_record_pokes(event, group_id, records)
-        waiting_text = await self._query_waiting_text(event, group_id, target, target_name)
         if text_only:
-            if waiting_text and not await self._try_send(event, event.plain_result(waiting_text)):
-                return [event.plain_result(waiting_text)]
-            if await self._try_send_records_forward_text(event, records, target_name):
+            if lead_text and not await self._try_send(event, event.plain_result(lead_text)):
+                return [event.plain_result(lead_text)]
+            if await self._try_send_records_forward_text(
+                event, records, target_name, context_mode=context_mode
+            ):
                 return []
             return [event.plain_result(self._records_forward_unavailable_text())]
 
         records, temporary_image_paths = await self._prepare_records_for_render(records)
-        blocks = self._build_blocks(records, target_name, target, reverse=query_reverse)
+        blocks = self._build_blocks(
+            records, target_name, target, reverse=query_reverse, context_mode=context_mode
+        )
         chunks = self._chunk_blocks(blocks)
         chunks = self._limit_chunks(chunks, self._max_query_pages())
         self._log_query_image_diagnostics(group_id, target, records, page_count=len(chunks))
         if not chunks:
             self._delete_cached_image_paths(temporary_image_paths)
-            if await self._try_send_records_forward_text(event, records, target_name):
+            if await self._try_send_records_forward_text(
+                event, records, target_name, context_mode=context_mode
+            ):
                 return []
             return [event.plain_result(self._records_forward_unavailable_text())]
 
-        if waiting_text and not await self._try_send(event, event.plain_result(waiting_text)):
+        if send_lead_first and lead_text and not await self._try_send(event, event.plain_result(lead_text)):
             self._delete_cached_image_paths(temporary_image_paths)
-            return [event.plain_result(waiting_text)]
+            return [event.plain_result(lead_text)]
 
         image_paths: list[str] = []
         group_name = await self._group_name(event, group_id)
         member_count = await self._member_count(event, group_id)
-        context_enabled = any(item.get("is_context") for item in records)
+        context_enabled = self._records_show_context(records, context_mode)
         render_time = datetime.now().strftime("%H:%M")
         header_image = self._header_image_url()
         footer_image = self._footer_image_url()
@@ -1391,18 +1416,61 @@ class MentionEchoPlugin(
                 ]
             )
 
-            if not await self._try_send_images(event, image_paths):
+            if not send_lead_first and lead_text:
+                if not await self._try_send_text_images(event, lead_text, image_paths):
+                    await self._try_send(event, event.plain_result(lead_text))
+                    for image_path in image_paths:
+                        if not await self._try_send(event, event.image_result(image_path)):
+                            raise RuntimeError(f"发送图片失败: {image_path}")
+            elif not await self._try_send_images(event, image_paths):
                 for image_path in image_paths:
                     if not await self._try_send(event, event.image_result(image_path)):
                         raise RuntimeError(f"发送图片失败: {image_path}")
         except Exception as exc:
             logger.error(f"[艾特回声] 渲染或发送图片失败: {exc}")
-            if not await self._try_send_records_forward_text(event, records, target_name):
+            if not await self._try_send_records_forward_text(
+                event, records, target_name, context_mode=context_mode
+            ):
                 await self._try_send(event, event.plain_result(self._records_forward_unavailable_text()))
         finally:
             self._delete_cached_image_paths(temporary_image_paths)
 
         return []
+
+    def _query_recent_limit(self, match: re.Match[str] | None) -> int:
+        """本次查询只看最近多少次艾特：命令里的数字优先，其次配置项，0 = 全部。"""
+        raw = str((match.groupdict().get("count") if match else "") or "").strip()
+        if raw:
+            try:
+                return max(1, min(QUERY_RECENT_MAX, int(raw)))
+            except ValueError:
+                pass
+        return self._query_recent_count()
+
+    def _query_recap_summary(
+        self, records: list[dict[str, Any]], total: int, context_mode: str
+    ) -> str:
+        """「只看最近 N 次」时替代等待提示的一行摘要。"""
+        newest = max((self._record_time(record) for record in records), default=0)
+        lines = [
+            f"艾特回顾 · 最近 {len(records)} 次（共 {total} 条记录）",
+            f"最近一次：{self._ago_text(newest)}",
+        ]
+        if context_mode == "never":
+            lines.append("提示：当前配置为「从不展示上下文」，只会看到被艾特的那一条。")
+        elif not any(record.get("before") or record.get("after") for record in records):
+            lines.append(
+                "提示：这几条还没存下群聊上下文。管理员发送「开启艾特上下文」，之后的艾特就会连带前后消息。"
+            )
+        return "\n".join(lines)
+
+    def _records_show_context(self, records: list[dict[str, Any]], context_mode: str) -> bool:
+        """这批记录最终会不会展示上下文（只用于出图时的表头提示）。"""
+        if context_mode == "never":
+            return False
+        if context_mode == "always":
+            return any(record.get("before") or record.get("after") for record in records)
+        return any(record.get("is_context") for record in records)
 
     async def _rank(self, event: AstrMessageEvent, group_id: str, match: re.Match[str]) -> list[Any]:
         """统计谁最常艾特发起人。纯文本输出，不走渲染，随手就能查。"""
@@ -1459,99 +1527,7 @@ class MentionEchoPlugin(
             lines.append(f"（仅显示前 {RANK_TOP_N} 名）")
         return [event.plain_result("\n".join(lines))]
 
-    async def _recap(self, event: AstrMessageEvent, group_id: str, match: re.Match[str]) -> list[Any]:
-        """久没看群时的「补课视图」：最近 N 次艾特 + 每次艾特前后的群聊上下文。
-
-        数据结构本来就存了 before/after，这里只是把它们强制展开渲染出来。
-        """
-        me = self._sender_id(event)
-        if not me:
-            return [event.plain_result("拿不到你的账号信息，无法回顾")]
-
-        count = RECAP_DEFAULT_COUNT
-        raw_count = match.group(1)
-        if raw_count:
-            try:
-                count = max(1, min(RECAP_MAX_COUNT, int(raw_count)))
-            except ValueError:
-                count = RECAP_DEFAULT_COUNT
-
-        records = self._dedupe_records(
-            await self._get_records(group_id, me) + await self._get_records(group_id, ALL_TARGET)
-        )
-        if not records:
-            return [event.plain_result("目前还没有人艾特过你，没什么要补的。")]
-
-        total = len(records)
-        latest_first = sorted(records, key=self._record_sort_key, reverse=True)[:count]
-        newest_time = self._record_time(latest_first[0]) if latest_first else 0
-        has_context = any(record.get("before") or record.get("after") for record in latest_first)
-
-        target_name = await self._target_name(event, group_id, me)
-        query_reverse = self._query_reverse_order()
-        selected = sorted(latest_first, key=self._record_sort_key, reverse=query_reverse)
-        selected = await self._resolve_record_pokes(event, group_id, selected)
-
-        summary_lines = [
-            f"艾特回顾 · 最近 {len(latest_first)} 次（共 {total} 条记录）",
-            f"最近一次：{self._recap_ago_text(newest_time)}",
-        ]
-        if not has_context:
-            summary_lines.append("提示：本群还没开启「艾特上下文」，所以只能看到艾特本身。管理员发送「开启艾特上下文」即可连带群聊记录。")
-        summary_text = "\n".join(summary_lines)
-
-        if self._render_text_only():
-            if not await self._try_send(event, event.plain_result(summary_text)):
-                return [event.plain_result(summary_text)]
-            if await self._try_send_records_forward_text(event, selected, target_name):
-                return []
-            return [event.plain_result(self._records_forward_unavailable_text())]
-
-        prepared, temporary_image_paths = await self._prepare_records_for_render(selected)
-        blocks = self._build_blocks(
-            prepared, target_name, me, reverse=query_reverse, force_context=True
-        )
-        chunks = self._limit_chunks(self._chunk_blocks(blocks), self._max_query_pages())
-        if not chunks:
-            self._delete_cached_image_paths(temporary_image_paths)
-            if await self._try_send_records_forward_text(event, prepared, target_name):
-                return []
-            return [event.plain_result(self._records_forward_unavailable_text())]
-
-        image_paths: list[str] = []
-        try:
-            image_paths = await self._render_query_images(
-                [
-                    {
-                        "blocks": chunk,
-                        "group_name": await self._group_name(event, group_id),
-                        "member_count": await self._member_count(event, group_id),
-                        "target_name": target_name,
-                        "total_records": total,
-                        "context_enabled": has_context,
-                        "now": datetime.now().strftime("%H:%M"),
-                        "page_label": f"第 {idx} / {len(chunks)} 页" if len(chunks) > 1 else "",
-                        "header_image": self._header_image_url(),
-                        "footer_image": self._footer_image_url(),
-                    }
-                    for idx, chunk in enumerate(chunks, start=1)
-                ]
-            )
-            if not await self._try_send_text_images(event, summary_text, image_paths):
-                await self._try_send(event, event.plain_result(summary_text))
-                for image_path in image_paths:
-                    if not await self._try_send(event, event.image_result(image_path)):
-                        raise RuntimeError(f"发送图片失败: {image_path}")
-        except Exception as exc:
-            logger.error(f"[艾特回声] 艾特回顾渲染或发送失败: {exc}")
-            if not await self._try_send_records_forward_text(event, prepared, target_name):
-                await self._try_send(event, event.plain_result(self._records_forward_unavailable_text()))
-        finally:
-            self._delete_cached_image_paths(temporary_image_paths)
-
-        return []
-
-    def _recap_ago_text(self, timestamp: int) -> str:
+    def _ago_text(self, timestamp: int) -> str:
         stamp = int(timestamp or 0)
         if stamp <= 0:
             return "时间未知"
@@ -1674,11 +1650,14 @@ class MentionEchoPlugin(
         target_name: str,
         target_id: str = "",
         reverse: bool = True,
-        force_context: bool = False,
+        context_mode: str = "auto",
     ) -> list[dict[str, Any]]:
         messages = []
         for record in records:
-            show_context = bool(record.get("is_context") or force_context)
+            # auto=跟随群设置（记录上的 is_context）、always=只要存了就展示、never=只看被艾特那条
+            show_context = context_mode != "never" and bool(
+                record.get("is_context") or context_mode == "always"
+            )
             if show_context:
                 for idx, ctx in enumerate(record.get("before") or []):
                     msg = self._view_message(ctx, False, target_name, target_id)
@@ -2085,6 +2064,7 @@ class MentionEchoPlugin(
         target_name: str,
         target_id: str = "",
         reverse: bool = True,
+        context_mode: str = "auto",
     ) -> list[dict[str, Any]]:
         max_pages = self._max_query_pages()
         if max_pages <= 0:
@@ -2094,7 +2074,9 @@ class MentionEchoPlugin(
         selected_blocks: list[dict[str, Any]] = []
         latest_first = sorted(records, key=self._record_sort_key, reverse=True)
         for record in latest_first:
-            record_blocks = self._build_blocks([record], target_name, target_id, reverse=reverse)
+            record_blocks = self._build_blocks(
+                [record], target_name, target_id, reverse=reverse, context_mode=context_mode
+            )
             trial_blocks = (
                 [*selected_blocks, *record_blocks]
                 if reverse
@@ -2108,8 +2090,10 @@ class MentionEchoPlugin(
             max_messages = max_pages * max(1, self._max_messages_per_image())
             record_size = sum(len(block.get("msgs") or []) for block in record_blocks)
             for message_limit in range(min(record_size, max_messages), 0, -1):
-                trimmed = self._trim_record_context(record, message_limit)
-                trimmed_blocks = self._build_blocks([trimmed], target_name, target_id, reverse=reverse)
+                trimmed = self._trim_record_context(record, message_limit, context_mode=context_mode)
+                trimmed_blocks = self._build_blocks(
+                    [trimmed], target_name, target_id, reverse=reverse, context_mode=context_mode
+                )
                 trial_blocks = (
                     [*selected_blocks, *trimmed_blocks]
                     if reverse
@@ -2123,9 +2107,15 @@ class MentionEchoPlugin(
 
         return sorted(selected, key=self._record_sort_key, reverse=reverse)
 
-    def _trim_record_context(self, record: dict[str, Any], max_messages: int) -> dict[str, Any]:
+    def _trim_record_context(
+        self, record: dict[str, Any], max_messages: int, *, context_mode: str = "auto"
+    ) -> dict[str, Any]:
         trimmed = dict(record)
-        if max_messages <= 1 or not record.get("is_context"):
+        if (
+            max_messages <= 1
+            or context_mode == "never"
+            or not (record.get("is_context") or context_mode == "always")
+        ):
             trimmed["before"] = []
             trimmed["after"] = []
             return trimmed

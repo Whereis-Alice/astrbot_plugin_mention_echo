@@ -54,7 +54,19 @@ SLIMMABLE_TEXT_KEYS = frozenset(
 )
 
 
-QUERY_PATTERN = re.compile(r"^(谁(艾特|@|at)(我|他|她|它)|哪个逼(艾特|@|at)我)(?:\s*(?:\[CQ:at,[^\]]+\]|@.+))?$", re.I)
+# 「谁艾特我」是唯一的查询入口：可选的条数（谁艾特我 3）用于「久没看群补课」，
+# 回顾 / 补课 / catch_up 等词只是同一条命令的别名，默认查自己。
+QUERY_PATTERN = re.compile(
+    r"^(?:谁(?:艾特|@|at)(?:我|他|她|它)|哪个逼(?:艾特|@|at)我|"
+    r"(?:艾特|at)回顾|回顾(?:艾特|at)|(?:艾特|at)补课|at_recap|catch_?up)"
+    r"(?:\s*(?P<count>\d{1,3})\s*(?:次|条)?)?"
+    r"(?:\s*(?:\[CQ:at,[^\]]+\]|@.+))?$",
+    re.I,
+)
+# 别名形态里没有「我」字，需要显式认定为「查自己」（命令里带 @ 时仍以 @ 为准）。
+QUERY_SELF_ALIAS_PATTERN = re.compile(
+    r"^(?:(?:艾特|at)回顾|回顾(?:艾特|at)|(?:艾特|at)补课|at_recap|catch_?up)", re.I
+)
 HELP_PATTERN = re.compile(r"^(艾特帮助|at_help|who_at_me_help|mention_echo_help|help_at)$", re.I)
 CLEAR_PATTERN = re.compile(r"^(clear_at|清除(艾特|at)数据)$", re.I)
 CLEAR_ALL_PATTERN = re.compile(r"^(clear_all|清除全部(艾特|at)数据)$", re.I)
@@ -75,12 +87,6 @@ RANK_PATTERN = re.compile(
 )
 STORAGE_PATTERN = re.compile(r"^((艾特|at)(存储|占用|空间)(状态|情况)?|at_usage|at_storage)$", re.I)
 CLEANUP_PATTERN = re.compile(r"^((艾特|at)清理|立即清理(艾特|at)数据|at_cleanup)$", re.I)
-# 「艾特回顾」：久不看群时补课用——最近几次艾特 + 每次艾特前后的群聊上下文。
-RECAP_PATTERN = re.compile(
-    r"^(?:(?:艾特|at)回顾|回顾(?:艾特|at)|(?:艾特|at)补课|at_recap|catch_?up)"
-    r"(?:\s*(\d{1,2})\s*(?:次|条)?)?$",
-    re.I,
-)
 
 ALL_TARGET = "__all__"
 INDEX_KEY = "records:index"
@@ -137,9 +143,9 @@ LEGACY_RENDER_FILE_PREFIXES = ("who_at_me_",)
 RENDER_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 MANAGED_DATA_SUBDIRS = ("renders", "message_images")
 RANK_TOP_N = 10
-# 艾特回顾默认看最近 3 次艾特，最多 5 次（再多就该直接翻群了）。
-RECAP_DEFAULT_COUNT = 3
-RECAP_MAX_COUNT = 5
+# 查询默认看多少次艾特：0 = 全部记录（分页）。命令里带数字可临时覆盖。
+QUERY_RECENT_DEFAULT = 0
+QUERY_RECENT_MAX = 50
 # 供 LLM 调用的函数名；关闭配置项时会在 initialize() 里停用同名工具。
 LLM_TOOL_NAME = "mention_echo_recent_mentions"
 LLM_TOOL_MAX_RESULTS = 20

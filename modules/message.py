@@ -311,7 +311,12 @@ class MessageMixin:
         if mentions:
             return mentions[0]
         match = re.search(r"@\S*?\((\d{5,})\)|@(\d{5,})", text)
-        return next((group for group in match.groups() if group), "") if match else ""
+        if match:
+            return next((group for group in match.groups() if group), "")
+        # 「艾特回顾 / 补课 / catch_up」这类别名里没有「我」字，没点名就默认查自己。
+        if QUERY_SELF_ALIAS_PATTERN.search(text.strip()):
+            return self._sender_id(event)
+        return ""
 
     def _mentions(self, event: AstrMessageEvent) -> list[str]:
         result = []

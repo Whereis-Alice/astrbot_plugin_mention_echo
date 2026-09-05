@@ -79,6 +79,27 @@ class ConfigMixin:
         value = self._config_str("record", "query_sort_order", default="asc").strip().lower()
         return value in {"desc", "倒序", "reverse", "newest_first", "latest_first", "最新在上"}
 
+    def _query_context_mode(self) -> str:
+        """查询出图时怎么处理「艾特前后的群聊记录」：auto / always / never。
+
+        auto   跟随群设置（只有发过「开启艾特上下文」的群才展示）——默认
+        always 只要记录里存着上下文就一并展示，适合久不看群补课
+        never  只看被艾特那一条，出图最小
+        """
+        value = self._config_str("record", "query_context_mode", default="跟随群设置").strip().lower()
+        if value in {"always", "始终展示", "总是展示", "强制展示", "始终携带", "开启", "on", "true"}:
+            return "always"
+        if value in {"never", "从不展示", "不展示", "关闭", "off", "false"}:
+            return "never"
+        return "auto"
+
+    def _query_recent_count(self) -> int:
+        """查询默认只看最近多少次艾特；0 = 全部记录（分页展示）。"""
+        return max(
+            0,
+            min(QUERY_RECENT_MAX, self._config_int("record", "query_recent_count", default=QUERY_RECENT_DEFAULT)),
+        )
+
     def _render_mode(self) -> str:
         value = self._config_str("render", "render_mode", default="自动").strip().lower()
         if value in {"api", "api渲染", "html_render", "htmlrender"}:

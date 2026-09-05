@@ -34,3 +34,6 @@ jobs:
 
       - name: Run storage tests
         run: python tests/test_storage.py
+
+      - name: Run query tests
+        run: python tests/test_query.py
