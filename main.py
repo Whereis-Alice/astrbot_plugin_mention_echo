@@ -31,6 +31,9 @@ if __package__:
         QUERY_PATTERN,
         RANK_PATTERN,
         RANK_TOP_N,
+        RECAP_DEFAULT_COUNT,
+        RECAP_MAX_COUNT,
+        RECAP_PATTERN,
         REMINDER_CONTEXT_OFF_PATTERN,
         REMINDER_CONTEXT_ON_PATTERN,
         REMINDER_CONTEXT_SET_PATTERN,
@@ -67,6 +70,9 @@ else:
         QUERY_PATTERN,
         RANK_PATTERN,
         RANK_TOP_N,
+        RECAP_DEFAULT_COUNT,
+        RECAP_MAX_COUNT,
+        RECAP_PATTERN,
         REMINDER_CONTEXT_OFF_PATTERN,
         REMINDER_CONTEXT_ON_PATTERN,
         REMINDER_CONTEXT_SET_PATTERN,
@@ -421,6 +427,10 @@ class MentionEchoPlugin(
                 return [event.plain_result("艾特排行榜已在插件配置中关闭。")]
             return await self._rank(event, group_id, rank_match)
 
+        recap_match = RECAP_PATTERN.match(stripped)
+        if recap_match:
+            return await self._recap(event, group_id, recap_match)
+
         if STORAGE_PATTERN.match(stripped):
             if not self._is_admin(event):
                 return [event.plain_result("只有群管或主人可以查看存储状态哦")]
@@ -454,6 +464,7 @@ class MentionEchoPlugin(
                 REMINDER_CONTEXT_OFF_PATTERN,
                 REMINDER_CONTEXT_SET_PATTERN,
                 RANK_PATTERN,
+                RECAP_PATTERN,
                 STORAGE_PATTERN,
                 CLEANUP_PATTERN,
             )
@@ -1047,6 +1058,7 @@ class MentionEchoPlugin(
                 "items": [
                     {"command": "谁艾特我", "desc": "查看最近谁在本群艾特过你。"},
                     {"command": "谁艾特他 @某人", "desc": "查看指定成员被谁艾特过。"},
+                    {"command": "艾特回顾 / 艾特回顾 3", "desc": "久没看群时补课：最近几次艾特连带当时的群聊上下文。"},
                     {"command": "艾特帮助", "desc": "渲染本帮助图。"},
                 ],
             },
@@ -1447,6 +1459,113 @@ class MentionEchoPlugin(
             lines.append(f"（仅显示前 {RANK_TOP_N} 名）")
         return [event.plain_result("\n".join(lines))]
 
+    async def _recap(self, event: AstrMessageEvent, group_id: str, match: re.Match[str]) -> list[Any]:
+        """久没看群时的「补课视图」：最近 N 次艾特 + 每次艾特前后的群聊上下文。
+
+        数据结构本来就存了 before/after，这里只是把它们强制展开渲染出来。
+        """
+        me = self._sender_id(event)
+        if not me:
+            return [event.plain_result("拿不到你的账号信息，无法回顾")]
+
+        count = RECAP_DEFAULT_COUNT
+        raw_count = match.group(1)
+        if raw_count:
+            try:
+                count = max(1, min(RECAP_MAX_COUNT, int(raw_count)))
+            except ValueError:
+                count = RECAP_DEFAULT_COUNT
+
+        records = self._dedupe_records(
+            await self._get_records(group_id, me) + await self._get_records(group_id, ALL_TARGET)
+        )
+        if not records:
+            return [event.plain_result("目前还没有人艾特过你，没什么要补的。")]
+
+        total = len(records)
+        latest_first = sorted(records, key=self._record_sort_key, reverse=True)[:count]
+        newest_time = self._record_time(latest_first[0]) if latest_first else 0
+        has_context = any(record.get("before") or record.get("after") for record in latest_first)
+
+        target_name = await self._target_name(event, group_id, me)
+        query_reverse = self._query_reverse_order()
+        selected = sorted(latest_first, key=self._record_sort_key, reverse=query_reverse)
+        selected = await self._resolve_record_pokes(event, group_id, selected)
+
+        summary_lines = [
+            f"艾特回顾 · 最近 {len(latest_first)} 次（共 {total} 条记录）",
+            f"最近一次：{self._recap_ago_text(newest_time)}",
+        ]
+        if not has_context:
+            summary_lines.append("提示：本群还没开启「艾特上下文」，所以只能看到艾特本身。管理员发送「开启艾特上下文」即可连带群聊记录。")
+        summary_text = "\n".join(summary_lines)
+
+        if self._render_text_only():
+            if not await self._try_send(event, event.plain_result(summary_text)):
+                return [event.plain_result(summary_text)]
+            if await self._try_send_records_forward_text(event, selected, target_name):
+                return []
+            return [event.plain_result(self._records_forward_unavailable_text())]
+
+        prepared, temporary_image_paths = await self._prepare_records_for_render(selected)
+        blocks = self._build_blocks(
+            prepared, target_name, me, reverse=query_reverse, force_context=True
+        )
+        chunks = self._limit_chunks(self._chunk_blocks(blocks), self._max_query_pages())
+        if not chunks:
+            self._delete_cached_image_paths(temporary_image_paths)
+            if await self._try_send_records_forward_text(event, prepared, target_name):
+                return []
+            return [event.plain_result(self._records_forward_unavailable_text())]
+
+        image_paths: list[str] = []
+        try:
+            image_paths = await self._render_query_images(
+                [
+                    {
+                        "blocks": chunk,
+                        "group_name": await self._group_name(event, group_id),
+                        "member_count": await self._member_count(event, group_id),
+                        "target_name": target_name,
+                        "total_records": total,
+                        "context_enabled": has_context,
+                        "now": datetime.now().strftime("%H:%M"),
+                        "page_label": f"第 {idx} / {len(chunks)} 页" if len(chunks) > 1 else "",
+                        "header_image": self._header_image_url(),
+                        "footer_image": self._footer_image_url(),
+                    }
+                    for idx, chunk in enumerate(chunks, start=1)
+                ]
+            )
+            if not await self._try_send_text_images(event, summary_text, image_paths):
+                await self._try_send(event, event.plain_result(summary_text))
+                for image_path in image_paths:
+                    if not await self._try_send(event, event.image_result(image_path)):
+                        raise RuntimeError(f"发送图片失败: {image_path}")
+        except Exception as exc:
+            logger.error(f"[艾特回声] 艾特回顾渲染或发送失败: {exc}")
+            if not await self._try_send_records_forward_text(event, prepared, target_name):
+                await self._try_send(event, event.plain_result(self._records_forward_unavailable_text()))
+        finally:
+            self._delete_cached_image_paths(temporary_image_paths)
+
+        return []
+
+    def _recap_ago_text(self, timestamp: int) -> str:
+        stamp = int(timestamp or 0)
+        if stamp <= 0:
+            return "时间未知"
+        delta = max(0, int(time.time()) - stamp)
+        if delta < 60:
+            return "刚刚"
+        if delta < 3600:
+            return f"{delta // 60} 分钟前"
+        if delta < 86400:
+            return f"{delta // 3600} 小时前"
+        if delta < 86400 * 30:
+            return f"{delta // 86400} 天前（{self._rank_time_text(stamp)}）"
+        return self._rank_time_text(stamp)
+
     def _rank_time_text(self, timestamp: int) -> str:
         if timestamp <= 0:
             return "未知"
@@ -1555,10 +1674,12 @@ class MentionEchoPlugin(
         target_name: str,
         target_id: str = "",
         reverse: bool = True,
+        force_context: bool = False,
     ) -> list[dict[str, Any]]:
         messages = []
         for record in records:
-            if record.get("is_context"):
+            show_context = bool(record.get("is_context") or force_context)
+            if show_context:
                 for idx, ctx in enumerate(record.get("before") or []):
                     msg = self._view_message(ctx, False, target_name, target_id)
                     msg["sort_phase"] = 0
@@ -1572,7 +1693,7 @@ class MentionEchoPlugin(
             main["sort_time"] = float(record.get("time", 0))
             messages.append(main)
 
-            if record.get("is_context"):
+            if show_context:
                 for idx, ctx in enumerate(record.get("after") or []):
                     msg = self._view_message(ctx, False, target_name, target_id)
                     msg["sort_phase"] = 2
@@ -1651,6 +1772,7 @@ class MentionEchoPlugin(
             "has_message_after_images": bool(message_after_images),
             "message_after_images_html": html.escape(message_after_images).replace("\n", "<br>"),
             "images": images,
+            "expired_images": self._record_expired_image_count(data),
             "media": media,
             "quote": self._view_quote(data.get("quote")),
             "time": data.get("time", 0),
@@ -1790,6 +1912,7 @@ class MentionEchoPlugin(
             or msg.get("is_poke")
             or msg.get("is_at")
             or msg.get("has_message_after_images")
+            or msg.get("expired_images")
         )
 
     def _timeline_message_key(self, msg: dict[str, Any]) -> tuple[Any, ...]:
@@ -1853,6 +1976,9 @@ class MentionEchoPlugin(
             base["message_html"] = html.escape(message).replace("\n", "<br>")
             base["has_message"] = bool(message.strip())
         base["images"] = self._unique_strings([*(base.get("images") or []), *(other.get("images") or [])])
+        base["expired_images"] = max(
+            int(base.get("expired_images") or 0), int(other.get("expired_images") or 0)
+        )
         base["media"] = self._unique_media([*(base.get("media") or []), *(other.get("media") or [])])
         base["at_after_image"] = bool(base.get("at_after_image") or other.get("at_after_image"))
         if not base.get("has_message_after_images") and other.get("has_message_after_images"):

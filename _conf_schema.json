@@ -40,10 +40,10 @@
         "hint": "超过后会保留最新记录。"
       },
       "recent_image_cache_records": {
-        "description": "最近多少条记录缓存消息图片",
+        "description": "最近多少条记录保留原图文件",
         "type": "int",
-        "default": 0,
-        "hint": "0 表示不缓存消息图片；大于 0 时仅最近 N 条记录保存本地图片缓存，旧记录会删除本地缓存并继续使用 QQ 临时链接。"
+        "default": 20,
+        "hint": "数据库里永远只存图片引用，图片本体存在插件数据目录。这个值决定「最近 N 条记录的原图留在磁盘上」，更早的记录会释放原图、只留一个占位（QQ 图片链接过期后无法重新下载，所以要留一小段窗口）。0 表示完全不留原图，最省空间。"
       },
       "image_cache_retention_hours": {
         "description": "图片缓存保留时间(小时)",
@@ -272,13 +272,13 @@
       "images_max_mb": {
         "description": "消息图片缓存上限（MB）",
         "type": "int",
-        "default": 256,
+        "default": 128,
         "hint": "message_images 目录的容量上限，超出时按日期从最旧的一天开始删。0 表示不限制。"
       },
       "total_quota_mb": {
         "description": "插件数据目录总配额（MB）",
         "type": "int",
-        "default": 512,
+        "default": 256,
         "hint": "所有可清理目录的总上限，作为兜底：即使单项上限都没超，总量超了也会继续删最旧的文件。你上传的字体和自定义图片（resources 目录）永远不会被删。0 表示不限制。"
       },
       "purge_orphan_keys": {

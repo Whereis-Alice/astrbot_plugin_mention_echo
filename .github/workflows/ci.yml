@@ -31,3 +31,6 @@ jobs:
 
       - name: Run maintenance tests
         run: python tests/test_maintenance.py
+
+      - name: Run storage tests
+        run: python tests/test_storage.py

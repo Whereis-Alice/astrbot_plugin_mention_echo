@@ -449,11 +449,13 @@ class MaintenanceMixin:
             + int(image_stats.get("freed_bytes", 0))
             + int(quota_stats.get("freed_bytes", 0))
         )
+        db_reclaimed_bytes = int(kv_stats.get("bytes_reclaimed", 0))
         report: dict[str, Any] = {
             "reason": reason,
             "elapsed": round(time.time() - started, 3),
             "removed_files": removed_files,
             "freed_bytes": freed_bytes,
+            "db_reclaimed_bytes": db_reclaimed_bytes,
             "kv": kv_stats,
             "renders": render_stats,
             "images": image_stats,
@@ -464,10 +466,17 @@ class MaintenanceMixin:
 
         summary = (
             f"{LOG_TAG} 巡检完成（{reason}）：删除文件 {removed_files} 个 / "
-            f"释放 {_human_bytes(freed_bytes)}，过期记录 {kv_stats.get('records_removed', 0)} 条，"
+            f"释放 {_human_bytes(freed_bytes)}，数据库瘦身 {_human_bytes(db_reclaimed_bytes)}，"
+            f"过期记录 {kv_stats.get('records_removed', 0)} 条，"
             f"回收键 {kv_stats.get('keys_removed', 0)} 个，耗时 {report['elapsed']:.2f}s"
         )
-        if removed_files or freed_bytes or kv_stats.get("records_removed") or kv_stats.get("keys_removed"):
+        if (
+            removed_files
+            or freed_bytes
+            or db_reclaimed_bytes
+            or kv_stats.get("records_removed")
+            or kv_stats.get("keys_removed")
+        ):
             logger.info(summary)
         else:
             logger.debug(summary)
@@ -525,6 +534,7 @@ class MaintenanceMixin:
             "members_removed": 0,
             "orphans_removed": 0,
             "index_rebuilt": 0,
+            "bytes_reclaimed": 0,
             "full_scan": False,
             "budget_exhausted": False,
         }
@@ -556,7 +566,9 @@ class MaintenanceMixin:
                     if not kept:
                         await drop(key)
                         continue
-                    if dropped:
+                    kept, freed = self._slim_records_for_storage(kept)
+                    stats["bytes_reclaimed"] += freed
+                    if dropped or freed:
                         await self._maintenance_put(key, kept)
                     record_keys.add(key)
                     for record in kept:
@@ -569,7 +581,9 @@ class MaintenanceMixin:
                     if not kept:
                         await drop(key)
                         continue
-                    if dropped:
+                    kept, freed = self._slim_records_for_storage(kept)
+                    stats["bytes_reclaimed"] += freed
+                    if dropped or freed:
                         await self._maintenance_put(key, kept)
                     pending_keys.add(key)
                     for record in kept:
@@ -707,6 +721,7 @@ class MaintenanceMixin:
                 "last_run": int(time.time()),
                 "reason": str(report.get("reason") or ""),
                 "freed_bytes": int(report.get("freed_bytes") or 0),
+                "db_reclaimed_bytes": int(report.get("db_reclaimed_bytes") or 0),
                 "removed_files": int(report.get("removed_files") or 0),
                 "elapsed": float(report.get("elapsed") or 0.0),
             },
@@ -799,7 +814,7 @@ class MaintenanceMixin:
             f"待发提醒：{kv.get('pending', 0)} 条 / {kv.get('pending_keys', 0)} 个会话｜上下文开启：{kv.get('context_keys', 0)} 个群｜成员缓存：{kv.get('member_keys', 0)} 条",
             f"最早记录：{_format_time(kv.get('oldest_record'))}（保留 {self._record_retention_days() or '不限'} 天）",
             "",
-            f"上次清理：{_format_time(state.get('last_run'))}｜释放 {_human_bytes(state.get('freed_bytes'))}｜删除 {state.get('removed_files', 0)} 个文件",
+            f"上次清理：{_format_time(state.get('last_run'))}｜释放 {_human_bytes(state.get('freed_bytes'))}｜删除 {state.get('removed_files', 0)} 个文件｜数据库瘦身 {_human_bytes(state.get('db_reclaimed_bytes'))}",
             f"自动清理：{'开启' if self._maintenance_enabled() else '关闭'}（每 {self._maintenance_interval_hours()} 小时）｜成员缓存保留 {self._member_cache_retention_days() or '不限'} 天",
         ]
         if not kv.get("full_scan"):
@@ -816,6 +831,7 @@ class MaintenanceMixin:
             f"{PLUGIN_DISPLAY_NAME} · 清理完成（耗时 {float(report.get('elapsed') or 0):.2f}s）",
             "",
             f"删除文件 {report.get('removed_files', 0)} 个，释放 {_human_bytes(report.get('freed_bytes'))}",
+            f"数据库瘦身：剥离图片原文 {_human_bytes(kv.get('bytes_reclaimed'))}",
             f"清理过期/超量记录 {kv.get('records_removed', 0)} 条",
             f"回收 KV 键 {kv.get('keys_removed', 0)} 个（成员缓存 {kv.get('members_removed', 0)}，孤儿键 {kv.get('orphans_removed', 0)}）",
             f"索引重建 {kv.get('index_rebuilt', 0)} 处，扫描键 {kv.get('scanned_keys', 0)} 个",

@@ -1551,6 +1551,20 @@ class MessageMixin:
             images = [images]
         return self._renderable_images(images)
 
+    def _record_expired_image_count(self, data: dict[str, Any]) -> int:
+        """数一数这条消息里有几张图已被清理策略释放，好在渲染结果里如实说明。"""
+        count = 0
+        for key in ("images", "image"):
+            value = data.get(key)
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, list):
+                continue
+            count += sum(
+                1 for item in value if isinstance(item, str) and item.strip() == IMAGE_EXPIRED_REF
+            )
+        return count
+
     def _record_renderable_media(self, data: dict[str, Any]) -> list[dict[str, str]]:
         raw_media = data.get("media") or []
         if not isinstance(raw_media, list):
@@ -1630,6 +1644,10 @@ class MessageMixin:
         value = str(image or "").strip()
         if not value:
             return ""
+        if value.startswith(IMAGE_REF_PREFIX):
+            # mecache:// 引用：字节在缓存目录里，渲染时才读出来内联。
+            path = self._image_ref_to_path(value)
+            return self._local_image_data_uri(path) if path is not None else ""
         if re.match(r"^https?://", value, re.I):
             return ""
         if re.match(r"^data:image/", value, re.I):

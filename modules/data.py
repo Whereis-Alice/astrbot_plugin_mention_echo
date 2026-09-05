@@ -129,7 +129,26 @@ class DataMixin:
         return lock
 
     async def put_kv_data(self, key: str, value: Any) -> Any:
+        value = self._gate_kv_value(key, value)
         return await self._run_kv_write(super().put_kv_data, key, value)
+
+    def _gate_kv_value(self, key: str, value: Any) -> Any:
+        """写库前的最后一道闸门：记录类数据里绝不允许出现图片原文。
+
+        正常路径上 `_cache_record_images` 已经把图片外置成引用了，这里只兜住
+        旧版本遗留数据和任何绕过缓存流程的写入，避免 base64 再次进库。
+        """
+        if not isinstance(value, list):
+            return value
+        text_key = str(key or "")
+        if not text_key.startswith(("records:", "reminder:pending:")):
+            return value
+        slimmed, freed = self._slim_records_for_storage(value)
+        if freed > 0:
+            logger.info(
+                f"[艾特回声] 写入 {text_key} 前剥离图片原文，回收 {freed / 1048576:.2f} MB"
+            )
+        return slimmed
 
     async def delete_kv_data(self, key: str) -> Any:
         return await self._run_kv_write(super().delete_kv_data, key)
@@ -196,7 +215,11 @@ class DataMixin:
             self._drop_records_image_cache(pruned_cache_records, delete_files=True)
 
     async def _cache_record_images(self, record: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
-        if self._recent_image_cache_records() <= 0 and not force:
+        keep_files = force or self._recent_image_cache_records() > 0
+        # 无论走哪条分支，都先把图片原文搬出数据库：能留盘的落盘换成 mecache://
+        # 引用，不能留盘的直接换成过期占位。
+        await self._externalize_record_images(record, allow_spill=keep_files)
+        if not keep_files:
             self._drop_record_image_cache(record, delete_files=False)
             return record
 
@@ -251,14 +274,287 @@ class DataMixin:
         candidates = []
         for image in images:
             source = str(image or "").strip()
-            if source and source not in cached_sources:
-                candidates.append(image)
+            if not source or source in cached_sources:
+                continue
+            # mecache:// 引用的字节已经在缓存目录里了，再缓存一次就是把同一张图
+            # 存两遍（上游那个 4 MB 变 8 MB 的 bug 就是这么来的）。
+            if self._is_image_ref(source):
+                continue
+            candidates.append(image)
 
         new_cache = await self._cache_images(candidates, existing_hashes=cached_hashes)
         if existing_cache or new_cache:
             record["image_cache"] = self._dedupe_image_cache_entries([*existing_cache, *new_cache])
         else:
             record.pop("image_cache", None)
+
+    # ---- 图片引用化（v1.1.0）----
+    # 数据库里只允许出现三种形态：http(s) 链接、mecache:// 引用、过期占位。
+    # 图片字节一律躺在插件数据目录里，由存储配额和自动清理统一管理。
+
+    def _is_image_ref(self, value: Any) -> bool:
+        return str(value or "").strip().startswith(IMAGE_REF_PREFIX)
+
+    def _is_expired_image_ref(self, value: Any) -> bool:
+        return str(value or "").strip() == IMAGE_EXPIRED_REF
+
+    def _is_inline_image_source(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        return text.startswith("base64://") or text.lower().startswith("data:image/")
+
+    def _needs_externalizing(self, value: Any) -> bool:
+        """判断这个字符串是否「太重，不该进数据库」。"""
+        text = str(value or "").strip()
+        if not text or self._is_image_ref(text):
+            return False
+        return len(text) > MAX_IMAGE_REF_CHARS
+
+    def _image_ref_from_path(self, path_value: Any) -> str:
+        """把缓存目录里的绝对路径压成 mecache://<相对路径>。"""
+        text = str(path_value or "").strip()
+        if not text:
+            return ""
+        try:
+            root = self._message_image_cache_dir().resolve()
+            relative = Path(text).resolve().relative_to(root)
+        except (OSError, ValueError):
+            return ""
+        return IMAGE_REF_PREFIX + relative.as_posix()
+
+    def _image_ref_to_path(self, ref: Any) -> Path | None:
+        """把 mecache:// 引用还原成绝对路径；越界的引用一律拒绝。"""
+        text = str(ref or "").strip()
+        if not self._is_image_ref(text) or self._is_expired_image_ref(text):
+            return None
+        relative = text[len(IMAGE_REF_PREFIX):].strip().lstrip("/")
+        if not relative:
+            return None
+        try:
+            root = self._message_image_cache_dir().resolve()
+            resolved = (root / relative).resolve()
+        except (OSError, ValueError):
+            return None
+        # 只允许指向缓存目录内部，挡住 ../ 与绝对路径注入。
+        if resolved == root or root not in resolved.parents:
+            return None
+        return resolved
+
+    def _storable_image_source(self, source: Any) -> str:
+        """image_cache 里的 source 字段只保留「能便宜地存起来」的形态。"""
+        value = str(source or "").strip()
+        if not value or self._is_image_ref(value):
+            return value
+        if len(value) > MAX_IMAGE_REF_CHARS:
+            return IMAGE_EXPIRED_REF
+        return value
+
+    def _has_live_image_refs(self, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip()) and not self._is_expired_image_ref(value)
+        if isinstance(value, list):
+            return any(self._has_live_image_refs(item) for item in value)
+        if isinstance(value, dict):
+            return any(
+                self._has_live_image_refs(value.get(key))
+                for key in ("local", "url", "source", "file", "path")
+            )
+        return False
+
+    def _dedupe_refs(self, values: list[Any]) -> list[Any]:
+        result: list[Any] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                result.append(value)
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            if self._is_expired_image_ref(text):
+                # 过期占位不去重：前端要按张数提示「N 张图片已过期」。
+                result.append(text)
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    async def _externalize_image_source(self, source: Any, *, allow_spill: bool) -> str:
+        value = str(source or "").strip()
+        if not value or self._is_image_ref(value):
+            return value
+        if not self._needs_externalizing(value):
+            # http(s) 链接、短路径这类轻量引用可以直接进库。
+            return value
+        if not allow_spill:
+            return IMAGE_EXPIRED_REF
+        cached = await self._cache_image(value)
+        ref = self._image_ref_from_path(cached.get("local")) if cached else ""
+        return ref or IMAGE_EXPIRED_REF
+
+    async def _externalize_record_images(self, record: Any, *, allow_spill: bool) -> None:
+        """递归把记录里的图片原文换成引用，就地修改。
+
+        allow_spill=True：原文落盘，换成 mecache:// 引用；
+        allow_spill=False：这条记录已经不在留盘窗口里，直接换成过期占位。
+        """
+        if not isinstance(record, dict):
+            return
+
+        for key in ("images", "image"):
+            value = record.get(key)
+            if isinstance(value, str):
+                record[key] = await self._externalize_image_source(value, allow_spill=allow_spill)
+                continue
+            if not isinstance(value, list):
+                continue
+            replaced: list[Any] = []
+            for item in value:
+                if isinstance(item, str):
+                    replaced.append(await self._externalize_image_source(item, allow_spill=allow_spill))
+                elif isinstance(item, dict):
+                    await self._externalize_record_images(item, allow_spill=allow_spill)
+                    replaced.append(item)
+                else:
+                    replaced.append(item)
+            record[key] = self._dedupe_refs(replaced)
+
+        cache = record.get("image_cache")
+        if isinstance(cache, list):
+            for item in cache:
+                if isinstance(item, dict) and "source" in item:
+                    item["source"] = self._storable_image_source(item.get("source"))
+
+        quote = record.get("quote")
+        if isinstance(quote, dict):
+            await self._externalize_record_images(quote, allow_spill=allow_spill)
+
+        media = record.get("media")
+        if isinstance(media, list):
+            for item in media:
+                if not isinstance(item, dict):
+                    continue
+                cover = item.get("cover")
+                if isinstance(cover, str) and cover.strip():
+                    item["cover"] = await self._externalize_image_source(cover, allow_spill=allow_spill)
+                cover_cache = item.get("cover_cache")
+                if isinstance(cover_cache, dict) and "source" in cover_cache:
+                    cover_cache["source"] = self._storable_image_source(cover_cache.get("source"))
+
+        for key in ("before", "after"):
+            items = record.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                await self._externalize_record_images(item, allow_spill=allow_spill)
+
+    def _expire_image_source(self, value: Any, delete_files: bool) -> str:
+        text = str(value or "").strip()
+        if not text or self._is_expired_image_ref(text):
+            return IMAGE_EXPIRED_REF if text else ""
+        if self._is_image_ref(text):
+            if delete_files:
+                path = self._image_ref_to_path(text)
+                if path is not None:
+                    self._delete_cached_image(str(path))
+            return IMAGE_EXPIRED_REF
+        if self._needs_externalizing(text):
+            # 历史数据里的 base64 原文：这里才是真正把上 G 空间还回来的地方。
+            return IMAGE_EXPIRED_REF
+        # http(s) 链接留着：不占空间，将来还有机会重新取回。
+        return text
+
+    def _drop_record_image_refs(self, record: Any, delete_files: bool) -> None:
+        if not isinstance(record, dict):
+            return
+
+        for key in ("images", "image"):
+            value = record.get(key)
+            if isinstance(value, str):
+                record[key] = self._expire_image_source(value, delete_files)
+            elif isinstance(value, list):
+                record[key] = [
+                    self._expire_image_source(item, delete_files) if isinstance(item, str) else item
+                    for item in value
+                ]
+
+        quote = record.get("quote")
+        if isinstance(quote, dict):
+            self._drop_record_image_refs(quote, delete_files)
+
+        media = record.get("media")
+        if isinstance(media, list):
+            for item in media:
+                if isinstance(item, dict) and isinstance(item.get("cover"), str):
+                    item["cover"] = self._expire_image_source(item["cover"], delete_files)
+
+        for key in ("before", "after"):
+            items = record.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                self._drop_record_image_refs(item, delete_files)
+
+    # ---- 入库前的兜底瘦身 ----
+
+    def _slim_records_for_storage(self, records: Any) -> tuple[Any, int]:
+        """扫描待入库记录，剥掉图片原文与超长文本，返回（新值, 回收字节数）。
+
+        没有需要回收的东西时原值返回，不做任何拷贝——正常路径上零额外开销。
+        """
+        if not isinstance(records, list):
+            return records, 0
+        freed = self._oversized_payload_bytes(records)
+        if freed <= 0:
+            return records, 0
+        slimmed = copy.deepcopy(records)
+        for record in slimmed:
+            self._slim_record_in_place(record)
+        return slimmed, freed
+
+    def _oversized_payload_bytes(self, value: Any, key: str = "") -> int:
+        if isinstance(value, str):
+            return self._slimmable_string_bytes(key, value)
+        if isinstance(value, dict):
+            return sum(self._oversized_payload_bytes(item, str(name)) for name, item in value.items())
+        if isinstance(value, (list, tuple)):
+            return sum(self._oversized_payload_bytes(item, key) for item in value)
+        return 0
+
+    def _slimmable_string_bytes(self, key: str, value: str) -> int:
+        if self._is_expirable_payload(key, value):
+            return len(value)
+        if key in SLIMMABLE_TEXT_KEYS and len(value) > MAX_RECORD_TEXT_CHARS:
+            return len(value) - MAX_RECORD_TEXT_CHARS
+        return 0
+
+    def _is_expirable_payload(self, key: str, value: str) -> bool:
+        """这个字符串是不是「必须踢出数据库的图片原文」。
+
+        两条判据：带 base64:// / data:image/ 前缀的内联图；或者出现在只该放引用的
+        字段里却超长——上游把裸 base64 直接塞进 images[]，正是靠第二条抓出来的。
+        """
+        if len(value) <= MAX_IMAGE_REF_CHARS or self._is_image_ref(value):
+            return False
+        return self._is_inline_image_source(value) or key in IMAGE_PAYLOAD_KEYS
+
+    def _slim_record_in_place(self, value: Any, key: str = "") -> Any:
+        if isinstance(value, str):
+            if self._is_expirable_payload(key, value):
+                return IMAGE_EXPIRED_REF
+            if key in SLIMMABLE_TEXT_KEYS and len(value) > MAX_RECORD_TEXT_CHARS:
+                return value[:MAX_RECORD_TEXT_CHARS] + "…"
+            return value
+        if isinstance(value, dict):
+            for name, item in list(value.items()):
+                value[name] = self._slim_record_in_place(item, str(name))
+            return value
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = self._slim_record_in_place(item, key)
+            return value
+        return value
 
     async def _prepare_records_for_render(
         self,
@@ -286,16 +582,32 @@ class DataMixin:
                     if local:
                         result.add(local)
 
+        def collect_refs(entries: Any) -> None:
+            values = [entries] if isinstance(entries, str) else entries
+            if not isinstance(values, list):
+                return
+            for entry in values:
+                if not isinstance(entry, str):
+                    continue
+                path = self._image_ref_to_path(entry)
+                if path is not None:
+                    result.add(str(path))
+
         collect(record.get("image_cache"))
+        collect_refs(record.get("images"))
+        collect_refs(record.get("image"))
         quote = record.get("quote")
         if isinstance(quote, dict):
             collect(quote.get("image_cache"))
+            collect_refs(quote.get("images"))
+            collect_refs(quote.get("image"))
         media = record.get("media")
         if isinstance(media, list):
             for item in media:
                 if isinstance(item, dict):
                     cache = item.get("cover_cache")
                     collect([cache] if isinstance(cache, dict) else cache)
+                    collect_refs(item.get("cover"))
         for key in ("before", "after"):
             items = record.get(key)
             if isinstance(items, list):
@@ -309,6 +621,12 @@ class DataMixin:
             self._delete_cached_image(path)
 
     async def _cache_media_covers(self, record: dict[str, Any]) -> None:
+        """把合并转发/卡片消息的封面图落盘，并让 cover 直接指向落盘引用。
+
+        这里不再另建 cover_cache：封面字节已经由 cover 的 mecache:// 引用管着，
+        再存一份 cover_cache 就是把同一张图存两遍（上游 4 MB 变 8 MB 的老毛病）。
+        旧数据里残留的 cover_cache 仍然会被清理逻辑正常识别和回收。
+        """
         media = record.get("media")
         if not isinstance(media, list):
             return
@@ -316,10 +634,19 @@ class DataMixin:
             if not isinstance(item, dict):
                 continue
             cover = str(item.get("cover") or "").strip()
-            if not cover:
+            if not cover or self._is_expired_image_ref(cover):
+                continue
+            if self._is_image_ref(cover):
+                # 已经是引用，字节就在缓存目录里，什么都不用做。
                 continue
             cached = await self._cache_image(cover)
-            if cached:
+            if not cached:
+                continue
+            ref = self._image_ref_from_path(cached.get("local"))
+            if ref:
+                item["cover"] = ref
+                item.pop("cover_cache", None)
+            else:
                 item["cover_cache"] = cached
 
     async def _cache_images(self, images: Any, existing_hashes: set[str] | None = None) -> list[dict[str, str]]:
@@ -362,7 +689,11 @@ class DataMixin:
             output = self._new_message_image_cache_path(suffix)
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(data)
-            return {"source": source, "local": str(output), "hash": digest}
+            return {
+                "source": self._storable_image_source(source),
+                "local": str(output),
+                "hash": digest,
+            }
         except Exception as exc:
             logger.debug(f"[艾特回声] 缓存消息图片失败: {type(exc).__name__}: {exc}")
             return None
@@ -436,6 +767,9 @@ class DataMixin:
             return self._decode_inline_image(value)
         if value.lower().startswith("data:image/"):
             return self._decode_inline_image(value)
+        if self._is_image_ref(value):
+            path = self._image_ref_to_path(value)
+            return self._read_local_image_path(path) if path is not None else (b"", "")
         if re.match(r"^file://", value, re.I):
             parsed = urlparse(value)
             path_text = unquote(parsed.path or "")
@@ -638,17 +972,28 @@ class DataMixin:
         return pruned_cache_records
 
     def _record_has_image_content(self, record: dict[str, Any]) -> bool:
-        if record.get("images") or record.get("image") or record.get("image_cache"):
+        # 只认「还能取回图片」的记录：全是过期占位的记录不该继续占用保留名额。
+        if (
+            self._has_live_image_refs(record.get("images"))
+            or self._has_live_image_refs(record.get("image"))
+            or record.get("image_cache")
+        ):
             return True
 
         quote = record.get("quote")
-        if isinstance(quote, dict) and (quote.get("images") or quote.get("image") or quote.get("image_cache")):
+        if isinstance(quote, dict) and (
+            self._has_live_image_refs(quote.get("images"))
+            or self._has_live_image_refs(quote.get("image"))
+            or quote.get("image_cache")
+        ):
             return True
 
         media = record.get("media")
         if isinstance(media, list):
             for item in media:
-                if isinstance(item, dict) and (item.get("cover") or item.get("cover_cache")):
+                if isinstance(item, dict) and (
+                    self._has_live_image_refs(item.get("cover")) or item.get("cover_cache")
+                ):
                     return True
         for key in ("before", "after"):
             items = record.get(key)
@@ -663,6 +1008,9 @@ class DataMixin:
         cache = record.pop("image_cache", None)
         if delete_files:
             self._delete_image_cache_entries(cache)
+        # 关键：光 pop image_cache 是不够的，images/image 里的引用和历史 base64
+        # 原文也必须一起释放，否则清理只清了一半，库还是会越来越大。
+        self._drop_record_image_refs(record, delete_files)
 
         quote = record.get("quote")
         if isinstance(quote, dict):

@@ -174,6 +174,18 @@
     .msg-bubble.images-first .msg-img:first-of-type {
       margin-top: 0;
     }
+    .expired-img {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      padding: 8px 12px;
+      border: 1px dashed #d6dbe4;
+      border-radius: 8px;
+      background: #f7f9fc;
+      color: #9aa3af;
+      font-size: 20px;
+    }
     .media-card {
       display: inline-flex;
       align-items: center;
@@ -485,7 +497,7 @@
                       {% if msg.tag_text %}<span class="tag-pill" style="background: {{ msg.tag_color }}; color: {{ msg.tag_text_color }}">{{ msg.tag_text }}</span>{% endif %}
                       <span class="nickname">{{ msg.nickname }}</span>
                     </div>
-                    {% if msg.quote or msg.is_at or msg.has_message or msg.images %}
+                    {% if msg.quote or msg.is_at or msg.has_message or msg.images or msg.expired_images %}
                       <div class="msg-bubble {% if msg.is_at %}is-at{% endif %} {% if msg.at_after_image %}images-first{% endif %}">
                         {% if msg.quote %}
                           <div class="quote-card">
@@ -516,6 +528,9 @@
                         {% for image in msg.images %}
                           <img src="{{ image }}" class="msg-img" onerror="const bubble=this.closest('.msg-bubble'); this.remove(); if (bubble && !bubble.querySelector('.quote-card, .msg-text, .msg-img')) bubble.remove()" />
                         {% endfor %}
+                        {% if msg.expired_images %}
+                          <div class="expired-img">&#128444; {{ msg.expired_images }} &#24352;&#22270;&#29255;&#24050;&#25353;&#28165;&#29702;&#31574;&#30053;&#37322;&#25918;</div>
+                        {% endif %}
                         {% if msg.has_message_after_images and not msg.at_after_image %}
                           <div class="msg-text after-images">{{ msg.message_after_images_html | safe }}</div>
                         {% endif %}

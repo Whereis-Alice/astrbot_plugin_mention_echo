@@ -20,6 +20,39 @@ MAINTENANCE_STATE_KEY = "maintenance:state"
 MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024
 MEMBER_CACHE_TTL_SECONDS = 5 * 60
 
+# ---- 图片存储约束（v1.1.0 起的硬规则）----
+# 数据库（KV）里只允许出现「可再取回的轻量引用」，图片字节一律落在插件数据目录的
+# 文件里，由存储配额与自动清理统一管理。允许的三种引用形态：
+#   1. http(s) 链接            —— 最省空间，渲染时按需下载
+#   2. mecache://<相对路径>     —— 指向插件图片缓存目录内的文件
+#   3. IMAGE_EXPIRED_REF       —— 原图已按策略释放，只保留「图片已过期」占位
+IMAGE_REF_PREFIX = "mecache://"
+IMAGE_EXPIRED_REF = "mecache://expired"
+# 单个图片引用允许的最大字符数；超过就判定成图片原文，直接换成过期占位。
+MAX_IMAGE_REF_CHARS = 1024
+# 单条记录正文允许的最大字符数，超出截断，避免异常长文本撑爆数据库。
+MAX_RECORD_TEXT_CHARS = 2000
+# 允许被截断的文本字段；其它字段（哈希、路径、ID）一律不动。
+# 这些字段天然只该放「图片引用」：一旦超过 MAX_IMAGE_REF_CHARS，
+# 就必然是历史遗留的图片原文（含没有 base64:// 前缀的裸原文），可以直接判过期。
+IMAGE_PAYLOAD_KEYS = frozenset(
+    {
+        "images",
+        "image",
+        "cover",
+        "source",
+        "local",
+        "url",
+        "file",
+        "path",
+        "thumb",
+        "thumbnail",
+    }
+)
+SLIMMABLE_TEXT_KEYS = frozenset(
+    {"message", "message_after_images", "text", "content", "title", "summary"}
+)
+
 
 QUERY_PATTERN = re.compile(r"^(谁(艾特|@|at)(我|他|她|它)|哪个逼(艾特|@|at)我)(?:\s*(?:\[CQ:at,[^\]]+\]|@.+))?$", re.I)
 HELP_PATTERN = re.compile(r"^(艾特帮助|at_help|who_at_me_help|mention_echo_help|help_at)$", re.I)
@@ -42,6 +75,12 @@ RANK_PATTERN = re.compile(
 )
 STORAGE_PATTERN = re.compile(r"^((艾特|at)(存储|占用|空间)(状态|情况)?|at_usage|at_storage)$", re.I)
 CLEANUP_PATTERN = re.compile(r"^((艾特|at)清理|立即清理(艾特|at)数据|at_cleanup)$", re.I)
+# 「艾特回顾」：久不看群时补课用——最近几次艾特 + 每次艾特前后的群聊上下文。
+RECAP_PATTERN = re.compile(
+    r"^(?:(?:艾特|at)回顾|回顾(?:艾特|at)|(?:艾特|at)补课|at_recap|catch_?up)"
+    r"(?:\s*(\d{1,2})\s*(?:次|条)?)?$",
+    re.I,
+)
 
 ALL_TARGET = "__all__"
 INDEX_KEY = "records:index"
@@ -52,7 +91,10 @@ KNOWN_KV_KEYS = frozenset({INDEX_KEY, CONTEXT_INDEX_KEY, REMINDER_PENDING_INDEX_
 KNOWN_KV_PREFIXES = ("records:", "context:", "reminder:", "member:", "maintenance:")
 
 MAX_RECORDS_PER_TARGET = 300
-RECENT_IMAGE_CACHE_RECORDS = 0
+# 每个会话保留「原图文件」的最近记录条数。0 = 不落盘（只留还能重取的链接）。
+# 上游默认 0，但同时把 base64 原文写进数据库，等于把图片存在最贵的地方；
+# 这里改成落盘 20 条，数据库只留引用。
+RECENT_IMAGE_CACHE_RECORDS = 20
 IMAGE_CACHE_RETENTION_HOURS = 24
 MAX_CONTEXT_MESSAGES = 5
 MAX_MESSAGES_PER_IMAGE = 12
@@ -86,8 +128,8 @@ RECORD_RETENTION_DAYS = 30
 MEMBER_CACHE_RETENTION_DAYS = 14
 CLEANUP_RENDER_HOURS = 24
 RENDERS_MAX_MB = 64
-IMAGES_MAX_MB = 256
-TOTAL_QUOTA_MB = 512
+IMAGES_MAX_MB = 128
+TOTAL_QUOTA_MB = 256
 ORPHAN_IMAGE_GRACE_MINUTES = 30
 RENDER_GRACE_MINUTES = 10
 RENDER_FILE_PREFIX = "mention_echo_"
@@ -95,6 +137,9 @@ LEGACY_RENDER_FILE_PREFIXES = ("who_at_me_",)
 RENDER_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 MANAGED_DATA_SUBDIRS = ("renders", "message_images")
 RANK_TOP_N = 10
+# 艾特回顾默认看最近 3 次艾特，最多 5 次（再多就该直接翻群了）。
+RECAP_DEFAULT_COUNT = 3
+RECAP_MAX_COUNT = 5
 # 供 LLM 调用的函数名；关闭配置项时会在 initialize() 里停用同名工具。
 LLM_TOOL_NAME = "mention_echo_recent_mentions"
 LLM_TOOL_MAX_RESULTS = 20
