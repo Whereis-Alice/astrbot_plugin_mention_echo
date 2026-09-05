@@ -1,0 +1,9 @@
+# 统一行尾，避免 Windows/Linux 之间产生无意义的 diff
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ttf binary
+*.otf binary

@@ -1,0 +1,15 @@
+name: astrbot_plugin_mention_echo
+display_name: 艾特回声
+desc: 记录群里谁艾特过你，回群自动提醒并渲染成一张精美图片；内置自动清理与存储配额，装上不用管。
+short_desc: 谁艾特我 · 带自动清理的艾特记忆插件。
+tags:
+  - 艾特
+  - "@"
+  - 艾特提醒
+  - 谁艾特我
+  - 自动清理
+category: 工具
+version: v1.0.0
+author: Whereis-Alice
+repo: "https://github.com/Whereis-Alice/astrbot_plugin_mention_echo"
+astrbot_version: ">=4.16,<5"

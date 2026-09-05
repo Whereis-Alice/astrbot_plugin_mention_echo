@@ -1,0 +1,310 @@
+{
+  "global": {
+    "description": "全局使用配置",
+    "type": "object",
+    "items": {
+      "enabled_group_umos": {
+        "description": "允许使用插件的群 UMO 白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空则所有群都可使用本插件；填入后只有这些 UMO 的群会记录、查询、清理和触发提醒。非白名单入口会静默忽略插件命令并阻止 LLM 接管。"
+      }
+    }
+  },
+  "feature": {
+    "description": "功能开关",
+    "type": "object",
+    "items": {
+      "rank_enabled": {
+        "description": "启用艾特排行榜",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后可用「艾特排行榜」查看谁最常艾特你，还能加天数，例如「艾特排行榜 7」只看最近 7 天。统计直接读已有记录，不额外占空间。"
+      },
+      "llm_tool_enabled": {
+        "description": "允许 LLM 主动查询艾特记录",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。开启后会向大模型注册一个函数工具，用户用自然语言问「刚才谁叫我」时，模型可以自己调用并读取该用户在本群的最近艾特记录（纯文字，最多 20 条）。开启即意味着这些聊天内容会随对话发给你配置的模型服务商，请自行评估隐私。修改后需要重载插件生效。"
+      }
+    }
+  },
+  "record": {
+    "description": "记录查询配置",
+    "type": "object",
+    "items": {
+      "max_records_per_target": {
+        "description": "每个群成员最多保留的艾特记录数",
+        "type": "int",
+        "default": 300,
+        "hint": "超过后会保留最新记录。"
+      },
+      "recent_image_cache_records": {
+        "description": "最近多少条记录缓存消息图片",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示不缓存消息图片；大于 0 时仅最近 N 条记录保存本地图片缓存，旧记录会删除本地缓存并继续使用 QQ 临时链接。"
+      },
+      "image_cache_retention_hours": {
+        "description": "图片缓存保留时间(小时)",
+        "type": "int",
+        "default": 24,
+        "hint": "定时清理该时间之前的旧图片缓存文件夹。如果设置为 0 或更低则禁用定时清理。"
+      },
+      "max_messages_per_image": {
+        "description": "单张查询图最多展示的消息条数",
+        "type": "int",
+        "default": 12,
+        "hint": "记录较多时会自动分多张图。"
+      },
+      "max_query_pages": {
+        "description": "单次查询最多发送图片页数",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示不限制；大于 0 时只发送最新 N 页，再按排序方式展示。"
+      },
+      "query_context_max_messages": {
+        "description": "查询上下文最多缓存消息条数",
+        "type": "int",
+        "default": 5,
+        "hint": "原版默认前后各 5 条。"
+      },
+      "query_sort_order": {
+        "description": "查询结果排序方式",
+        "type": "string",
+        "default": "正序",
+        "options": [
+          "正序",
+          "倒序"
+        ],
+        "hint": "正序=旧消息在上、最新消息在下；倒序=最新消息在上。"
+      }
+    }
+  },
+  "reminder": {
+    "description": "艾特提醒配置",
+    "type": "object",
+    "items": {
+      "default_group_enabled": {
+        "description": "新群默认开启被动艾特提醒",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后不会生成回群提醒；仍可用 #开启本群艾特提醒 单独开启。"
+      },
+      "enabled_group_umos": {
+        "description": "限定开启提醒的群 UMO 名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空则不限制群，继续使用默认群开关和群命令；填入后只有这些 UMO 的群会生成/推送提醒。可用 #艾特提醒状态 查看当前群 UMO。"
+      },
+      "default_user_enabled": {
+        "description": "用户默认接收艾特提醒",
+        "type": "bool",
+        "default": true,
+        "hint": "用户可用 #关闭我的艾特提醒 关闭。"
+      },
+      "user_whitelist": {
+        "description": "允许接收提醒的用户 QQ 白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空则不限制用户；填入后只有这些 QQ 号会进入被动艾特提醒队列。只影响提醒，不影响手动查询。"
+      },
+      "user_blacklist": {
+        "description": "禁止接收提醒的用户 QQ 黑名单",
+        "type": "list",
+        "default": [],
+        "hint": "填入后这些 QQ 号不会进入被动艾特提醒队列，也不会收到已排队的提醒。黑名单优先于白名单。只影响提醒，不影响手动查询。"
+      },
+      "away_minutes": {
+        "description": "离开判定分钟数",
+        "type": "int",
+        "default": 10,
+        "hint": "用户回来发言时，艾特消息超过这个时间才可能触发提醒。"
+      },
+      "min_messages_after_mention": {
+        "description": "触发提醒所需的最少群消息数",
+        "type": "int",
+        "default": 5,
+        "hint": "统计艾特消息之后、用户回来消息之前的群消息；与离开分钟数同时满足才提醒，0 表示不限制消息数。"
+      },
+      "max_pending_reminders": {
+        "description": "每人每群最多保留的待提醒记录数",
+        "type": "int",
+        "default": 50,
+        "hint": "超过后保留最新记录。"
+      },
+      "max_reminder_pages": {
+        "description": "单次提醒最多发送图片页数",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示不限制；大于 0 时只发送前 N 页。"
+      },
+      "default_context_enabled": {
+        "description": "默认开启提醒截图上下文",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后提醒截图可展示艾特前后消息。"
+      },
+      "default_context_before": {
+        "description": "默认提醒截图前文条数",
+        "type": "int",
+        "default": 1
+      },
+      "default_context_after": {
+        "description": "默认提醒截图后文条数",
+        "type": "int",
+        "default": 1
+      },
+      "max_context_messages": {
+        "description": "提醒上下文最大条数",
+        "type": "int",
+        "default": 5,
+        "hint": "Web 配置和群命令设置都会受这个上限限制。"
+      }
+    }
+  },
+  "render": {
+    "description": "图片渲染配置",
+    "type": "object",
+    "items": {
+      "render_mode": {
+        "description": "渲染方式",
+        "type": "string",
+        "default": "自动",
+        "options": [
+          "自动",
+          "API渲染",
+          "本地浏览器渲染",
+          "纯文字"
+        ],
+        "hint": "自动：按「优先使用本地浏览器渲染」决定先用哪个引擎，第一个失败自动换另一个，两个都失败才报错（推荐）；API渲染：只用 AstrBot t2i 服务，不启动本地浏览器，最省内存；本地浏览器渲染：只用 Playwright/Chromium，完全离线；纯文字：不出图，查询和提醒改用合并转发消息展示，平台不支持合并消息时只发一条短提示。"
+      },
+      "prefer_browser": {
+        "description": "优先使用本地 Playwright/Chromium 渲染",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭，即优先调用 AstrBot 的 t2i 出图服务（自建 t2i 通常更快、也不占机器人进程内存），失败时自动回退本地浏览器。打开后顺序相反：先本地浏览器，失败再试 t2i。仅在渲染方式为「自动」时生效。"
+      },
+      "image_quality": {
+        "description": "JPEG 图片质量",
+        "type": "int",
+        "default": 92,
+        "hint": "范围建议 60-100。对 Playwright/Chromium 截图和 API 渲染的 JPEG 兜底输出生效；纯文字模式不生效。"
+      },
+      "browser_timeout_seconds": {
+        "description": "单次渲染总超时秒数",
+        "type": "int",
+        "default": 25,
+        "hint": "单个引擎生成一张图的总耗时上限。t2i 会按页面超时另算一份预算（上限 45 秒），所以 t2i 失败后仍有时间回退到本地浏览器。纯文字模式不生效。"
+      },
+      "t2i_failure_cooldown_sec": {
+        "description": "t2i 出图失败后的冷却秒数",
+        "type": "int",
+        "default": 180,
+        "hint": "t2i 出一次图失败后，这段时间内的查询直接先用本地浏览器，不再重复白等一次超时；冷却期结束后自动重试 t2i，成功一次即立刻恢复。0 表示不冷却，每次都先试 t2i。"
+      },
+      "page_timeout_ms": {
+        "description": "浏览器页面加载超时毫秒数",
+        "type": "int",
+        "default": 20000,
+        "hint": "本地浏览器渲染的页面加载超时；同时作为 t2i 服务端的出图超时（送给 t2i 时不低于 10000 毫秒）。纯文字模式不生效。"
+      },
+      "header_image_url": {
+        "description": "结果图顶部状态栏图片 URL / 本地路径",
+        "type": "string",
+        "default": "",
+        "hint": "仅结果图截图模板生效；帮助图和纯文字模式不生效。可选项，留空时使用插件内置本地图片；Page 上传的自定义图片优先级更高。"
+      },
+      "footer_image_url": {
+        "description": "结果图底部图片 URL / 本地路径",
+        "type": "string",
+        "default": "",
+        "hint": "仅结果图截图模板生效；帮助图和纯文字模式不生效。可选项，留空时使用插件内置本地图片；Page 上传的自定义图片优先级更高。"
+      },
+      "cleanup_render_hours": {
+        "description": "渲染临时图片保留小时数",
+        "type": "int",
+        "default": 24,
+        "hint": "清理图片渲染产生的临时文件；纯文字模式通常不会产生渲染临时图。"
+      }
+    }
+  },
+  "maintenance": {
+    "description": "自动清理与存储上限",
+    "type": "object",
+    "items": {
+      "auto_cleanup": {
+        "description": "启用后台自动清理",
+        "type": "bool",
+        "default": true,
+        "hint": "插件会定期按下面的保留天数和容量上限清理过期记录、图片缓存与渲染临时图，把占用压回可控范围。关闭后只能靠「#艾特清理」手动清，磁盘会持续增长。"
+      },
+      "interval_hours": {
+        "description": "自动清理间隔（小时）",
+        "type": "int",
+        "default": 6,
+        "hint": "每隔多少小时跑一次后台清理，最小 1 小时。默认 6 小时，几乎无感。"
+      },
+      "first_run_delay_sec": {
+        "description": "启动后首次清理延迟（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "插件加载完成后等待这么久再做第一次清理，避免和 AstrBot 启动抢资源。最小 5 秒。"
+      },
+      "record_retention_days": {
+        "description": "艾特记录保留天数",
+        "type": "int",
+        "default": 30,
+        "hint": "超过这个天数的艾特记录会被删除，连带其本地图片缓存一起清掉。0 表示永久保留（不推荐，这是占用增长的主要来源）。"
+      },
+      "member_cache_retention_days": {
+        "description": "成员昵称缓存保留天数",
+        "type": "int",
+        "default": 14,
+        "hint": "群名片/昵称缓存的保留天数。上游版本的这份缓存只写不删，群多人多时会在数据库里堆成主要占用之一。过期后下次查询会自动重新拉取，不影响使用。0 表示永久保留。"
+      },
+      "renders_max_mb": {
+        "description": "渲染临时图目录上限（MB）",
+        "type": "int",
+        "default": 64,
+        "hint": "renders 目录的容量上限，超出时从最旧的图开始删。0 表示不限制。"
+      },
+      "images_max_mb": {
+        "description": "消息图片缓存上限（MB）",
+        "type": "int",
+        "default": 256,
+        "hint": "message_images 目录的容量上限，超出时按日期从最旧的一天开始删。0 表示不限制。"
+      },
+      "total_quota_mb": {
+        "description": "插件数据目录总配额（MB）",
+        "type": "int",
+        "default": 512,
+        "hint": "所有可清理目录的总上限，作为兜底：即使单项上限都没超，总量超了也会继续删最旧的文件。你上传的字体和自定义图片（resources 目录）永远不会被删。0 表示不限制。"
+      },
+      "purge_orphan_keys": {
+        "description": "清理孤儿数据键",
+        "type": "bool",
+        "default": true,
+        "hint": "顺手删掉不再被任何索引引用的历史数据键（多为旧版本残留或群解散后的遗留），并修正索引。只动本插件自己的键，建议保持开启。"
+      }
+    }
+  },
+  "message": {
+    "description": "提示文案配置",
+    "type": "object",
+    "items": {
+      "waiting_text_template": {
+        "description": "查询等待提示模板",
+        "type": "string",
+        "default": "让{bot_name}看看谁艾特过你哦，稍等一下~",
+        "hint": "可用变量：{bot_name}、{target_name}、{target_pronoun}；留空则不发送查询等待提示；查询别人且使用默认模板时会自动显示 ta。"
+      },
+      "reminder_text_template": {
+        "description": "回群提醒提示模板",
+        "type": "string",
+        "default": "{target_name}，你不在的时候有 {count} 条艾特记录~",
+        "hint": "可用变量：{target_name}、{count}；留空则只发送提醒图片，不发送提示文字。"
+      }
+    }
+  }
+}

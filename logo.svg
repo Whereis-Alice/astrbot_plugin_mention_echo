@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="艾特回声">
+  <title>艾特回声 · Mention Echo</title>
+  <defs>
+    <linearGradient id="me-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e6fff"/>
+      <stop offset="0.52" stop-color="#0f9fff"/>
+      <stop offset="1" stop-color="#28c2d1"/>
+    </linearGradient>
+    <radialGradient id="me-sheen" cx="0.26" cy="0.14" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.62" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="me-clip">
+      <rect x="0" y="0" width="512" height="512" rx="122" ry="122"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#me-clip)">
+    <rect x="0" y="0" width="512" height="512" rx="122" ry="122" fill="url(#me-bg)"/>
+    <rect x="0" y="0" width="512" height="512" rx="122" ry="122" fill="url(#me-sheen)"/>
+
+    <!-- 回声：向右扩散的三层声波 -->
+    <g fill="none" stroke="#ffffff" stroke-linecap="round">
+      <path d="M 377.62 361.8 A 180 180 0 0 0 377.62 150.2" stroke-width="19" stroke-opacity="0.52"/>
+      <path d="M 414.84 388.84 A 226 226 0 0 0 414.84 123.16" stroke-width="17" stroke-opacity="0.3"/>
+      <path d="M 452.05 415.88 A 272 272 0 0 0 452.05 96.12" stroke-width="15" stroke-opacity="0.15"/>
+    </g>
+
+    <!-- @ -->
+    <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-width="30">
+      <path d="M 342.3 236.55 A 112 112 0 1 0 306.94 339.23"/>
+      <circle cx="222" cy="256" r="42"/>
+      <path d="M 264 211 L 264 285 Q 264 309 293 311"/>
+    </g>
+  </g>
+</svg>
