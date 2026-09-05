@@ -301,8 +301,19 @@ def test_ref_rejects_escape() -> None:
     print("\n引用解析：拒绝越界路径（防 ../ 注入删到别处）")
     harness, root = _harness()
     try:
+        cache_root = harness._message_image_cache_dir().resolve()
+
+        def escapes(ref: str) -> bool:
+            """要么被拒（None），要么必须夹在缓存目录内部；绝不许指向目录外面。"""
+            got = harness._image_ref_to_path(IMAGE_REF_PREFIX + ref)
+            return got is not None and cache_root not in got.parents
+
         check(harness._image_ref_to_path(IMAGE_REF_PREFIX + "../../etc/passwd") is None, "拒绝 ../ 逃逸")
-        check(harness._image_ref_to_path(IMAGE_REF_PREFIX + "/C:/Windows/win.ini") is None, "拒绝绝对路径注入")
+        # 下面几种形态在不同平台上含义不同（"C:/x" 在 Linux 只是个普通目录名，
+        # 反斜线在 Linux 是合法文件名字符），所以这里断言的是「永远逃不出缓存目录」
+        # 这条不变量本身，而不是「一定返回 None」——后者在跨平台上并不成立。
+        for hostile in ("/C:/Windows/win.ini", "/etc/passwd", "..\\..\\windows\\win.ini", "./../x.png"):
+            check(not escapes(hostile), f"引用 {hostile} 逃不出缓存目录")
         check(harness._image_ref_to_path(IMAGE_REF_PREFIX) is None, "拒绝空引用")
         check(harness._image_ref_to_path(IMAGE_EXPIRED_REF) is None, "过期占位解析不出路径")
         check(harness._image_ref_to_path("https://example.com/a.jpg") is None, "非引用返回 None")
