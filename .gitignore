@@ -17,3 +17,6 @@ mention_echo_*.jpg
 mention_echo_*.jpeg
 mention_echo_*.png
 mention_echo_*.webp
+
+# AstrBot 被 import 时会在 cwd 下生成 data/，不是插件的一部分
+/data/

@@ -201,11 +201,15 @@ def _sweep_images_sync(
     expire_before: float,
     orphan_before: float,
     quota_bytes: int,
+    grace_before: float,
 ) -> dict[str, Any]:
     """清理 ``message_images/``：过期 + 孤儿 + 配额三重扫描。
 
     删除仍被记录引用的过期图片是安全的：``_cache_record_direct_images`` 会丢弃
     本地文件已不存在的缓存条目，渲染时按原始 URL 重新下载。
+
+    ``grace_before`` 之后落盘的文件不参与配额裁剪：维护锁只串行化「维护 vs 维护」，
+    并不阻塞查询，刚下载完还没渲染进图的文件必须留住，宁可暂时超配额。
     """
     cutoff_ymd = time.strftime("%Y%m%d", time.localtime(expire_before)) if expire_before > 0 else ""
     removed = 0
@@ -231,9 +235,11 @@ def _sweep_images_sync(
                 orphans += 1
 
     if quota_bytes > 0 and total > quota_bytes:
-        for path, _mtime, size in sorted(kept, key=lambda item: item[1]):
+        for path, mtime, size in sorted(kept, key=lambda item: item[1]):
             if total <= quota_bytes:
                 break
+            if mtime >= grace_before:
+                continue
             if _unlink(path):
                 removed += 1
                 freed += size
@@ -636,13 +642,15 @@ class MaintenanceMixin:
         now = time.time()
         retention_hours = self._image_cache_retention_hours()
         expire_before = now - retention_hours * 3600 if retention_hours > 0 else 0.0
+        grace_before = now - ORPHAN_IMAGE_GRACE_MINUTES * 60
         return await asyncio.to_thread(
             _sweep_images_sync,
             Path(self._message_image_cache_dir()),
             referenced,
             expire_before,
-            now - ORPHAN_IMAGE_GRACE_MINUTES * 60,
+            grace_before,
             self._images_max_mb() * _MB,
+            grace_before,
         )
 
     async def _enforce_total_quota(self) -> dict[str, Any]:

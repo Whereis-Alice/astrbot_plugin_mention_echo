@@ -1,0 +1,18 @@
+# 艾特回声 / astrbot_plugin_mention_echo —— 运行时依赖
+#
+# 本插件刻意保持「零第三方硬依赖」：所有实际用到的库都由 AstrBot 本体提供，
+# 不在这里重复声明，避免 pip 在插件安装阶段解析出与宿主冲突的版本。
+#
+#   pillow    图片合成 / 页脚拼接   —— AstrBot 核心依赖（>=11.2.1）
+#   quart     Web 面板路由         —— AstrBot 核心依赖（>=0.20.0）
+#   jinja2    HTML 模板渲染        —— 随 quart 传递引入
+#   aiohttp   下载消息里的图片     —— AstrBot 核心依赖（>=3.11.18）
+#
+# 可选：playwright
+#   仅在「本地浏览器兜底渲染」这条降级路径上需要（t2i 服务不可用时接管出图）。
+#   它不是 AstrBot 的依赖，也不写在这里——装上要额外拉 ~100MB 浏览器内核，
+#   对只用 t2i 的用户是纯浪费。需要兜底能力时请自行安装：
+#
+#       pip install playwright && playwright install chromium
+#
+#   未安装时插件会自动跳过这一层，继续降级为合并转发纯文本，不会报错。

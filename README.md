@@ -11,6 +11,7 @@
 [![version](https://img.shields.io/badge/version-v1.0.0-1e6fff?style=flat-square)](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%E2%89%A54.16%20%3C5-0f9fff?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
 [![license](https://img.shields.io/badge/license-MIT-28c2d1?style=flat-square)](LICENSE)
+[![CI](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/actions/workflows/ci.yml/badge.svg)](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/actions/workflows/ci.yml)
 [![platform](https://img.shields.io/badge/%E9%80%82%E9%85%8D-QQ%20%2F%20OneBot%20v11-8b95a5?style=flat-square)](#兼容性)
 
 </div>
@@ -307,6 +308,22 @@ astrbot_plugin_mention_echo/
 4. 命令**完全兼容**，群友照旧发 `谁艾特我` 就行，不用重新教。
 
 > 因为第 3 步是**复制**而不是移动，原插件的数据目录还会占着原来的空间。确认新插件工作正常后，可以手动删掉 `data/plugin_data/astrbot_plugin_who_at_me_pro/`。
+
+## 参与开发
+
+改代码之前，先跑一遍两个自检脚本（都只用标准库，不需要装 AstrBot、也不需要 pytest）：
+
+```bash
+python tests/test_maintenance.py             # 清理逻辑自测
+python .github/scripts/validate_manifest.py  # metadata / 配置项 / 更新日志 自洽性
+```
+
+- 清理是本插件唯一会**不可逆删除文件**的部分，改动 `modules/maintenance.py` 后请务必跑一遍上面的自测。
+- 代码按职责拆分在 `modules/` 下：`config`（读配置）、`data`（KV 存取）、`message`（解析消息）、
+  `rendering`（出图）、`maintenance`（清理）、`page_api` / `page_settings`（WebUI 外观设置）。
+- 本插件没有第三方硬依赖，`requirements.txt` 里写清了每个库由谁提供、哪个是可选的。
+- 版本号写在 `metadata.yaml`，推到 `main` 后由 GitHub Actions 自动发 Release，
+  说明取自 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 致谢与许可
 

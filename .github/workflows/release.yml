@@ -1,0 +1,61 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'metadata.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read version from metadata.yaml
+        id: version
+        run: |
+          VERSION="$(python .github/scripts/read_version.py)"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version = $VERSION"
+
+      - name: Skip if release already exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.version.outputs.value }} 已存在，跳过"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract changelog
+        if: steps.exists.outputs.value == 'false'
+        id: changelog
+        run: |
+          python .github/scripts/extract_changelog.py "${{ steps.version.outputs.value }}" > body.md
+          {
+            echo 'value<<CHANGELOG_EOF'
+            cat body.md
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+          rm -f body.md
+
+      - name: Create release
+        if: steps.exists.outputs.value == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          name: ${{ steps.version.outputs.value }}
+          body: ${{ steps.changelog.outputs.value }}
+          generate_release_notes: false
