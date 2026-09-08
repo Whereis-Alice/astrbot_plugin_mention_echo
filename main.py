@@ -697,10 +697,12 @@ class MentionEchoPlugin(
         self_id = self._self_id(event)
         targets = [target for target in mentions if target not in {self._sender_id(event), self_id}]
         if targets:
-            before = list(self.before_cache.get(group_id, [])) if record_context_on else []
+            cached_before = self.before_cache.get(group_id, [])
+            query_context_limit = self._query_context_max_messages()
+            before = list(cached_before[-query_context_limit:]) if record_context_on else []
             reminder_before_count = int(reminder_context.get("before", 1))
             reminder_before = (
-                list(self.before_cache.get(group_id, []))[-reminder_before_count:]
+                list(cached_before[-reminder_before_count:])
                 if reminder_context_on and reminder_before_count > 0
                 else []
             )
@@ -1397,6 +1399,8 @@ class MentionEchoPlugin(
         if recent > 0:
             records = sorted(records, key=self._record_sort_key, reverse=True)[:recent]
 
+        # 配置调小后应立即约束已有记录的查询结果；调大则只能作用于之后采集的新消息。
+        records = [self._limit_query_record_context(record) for record in records]
         records = self._select_query_records(
             records,
             target_name,
@@ -1652,8 +1656,9 @@ class MentionEchoPlugin(
         reverse: bool = True,
         context_mode: str = "auto",
     ) -> list[dict[str, Any]]:
-        messages = []
-        for record in records:
+        blocks: list[dict[str, Any]] = []
+        for record in sorted(records, key=self._record_sort_key, reverse=reverse):
+            messages: list[dict[str, Any]] = []
             # auto=跟随群设置（记录上的 is_context）、always=只要存了就展示、never=只看被艾特那条
             show_context = context_mode != "never" and bool(
                 record.get("is_context") or context_mode == "always"
@@ -1680,9 +1685,12 @@ class MentionEchoPlugin(
                     msg["sort_time"] = float(ctx.get("time", 0)) + 0.001 + idx * 0.001
                     messages.append(msg)
 
-        messages = self._dedupe_timeline_messages(messages, reverse=reverse)
-        messages = [message for message in messages if self._timeline_message_visible(message)]
-        return self._split_timeline_blocks(messages)
+            messages = self._dedupe_timeline_messages(messages, reverse=reverse)
+            messages = [message for message in messages if self._timeline_message_visible(message)]
+            if messages:
+                # 每次艾特独占一个块。否则下一次艾特的前文会在全局时间线里落到上一次艾特下面。
+                blocks.append({"msgs": messages, "record_start": True})
+        return blocks
 
     def _view_message(self, data: dict[str, Any], is_at: bool, target_name: str, target_id: str = "") -> dict[str, Any]:
         user_id = str(data.get("user_id") or data.get("User") or "")
@@ -1979,23 +1987,6 @@ class MentionEchoPlugin(
         text = re.sub(r"\s+", " ", str(message or "")).strip()
         return text in {"[视频]", "[语音]", "[文件]", "[表情]", "[卡片消息]"} or text.startswith("[文件] ")
 
-    def _split_timeline_blocks(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        blocks: list[dict[str, Any]] = []
-        current: list[dict[str, Any]] = []
-        current_has_at = False
-
-        for msg in messages:
-            if msg.get("is_at") and current and current_has_at:
-                blocks.append({"msgs": current})
-                current = []
-                current_has_at = False
-            current.append(msg)
-            current_has_at = current_has_at or bool(msg.get("is_at"))
-
-        if current:
-            blocks.append({"msgs": current})
-        return blocks
-
     def _message_key(self, msg: dict[str, Any]) -> tuple[Any, ...]:
         message_id = str(msg.get("message_id") or "")
         if message_id:
@@ -2033,6 +2024,7 @@ class MentionEchoPlugin(
             for start in range(0, len(messages), max_messages):
                 split_block = dict(block)
                 split_block["msgs"] = messages[start : start + max_messages]
+                split_block["record_start"] = bool(block.get("record_start", True)) and start == 0
                 split_blocks.append(split_block)
 
         for block in split_blocks:
@@ -2106,6 +2098,16 @@ class MentionEchoPlugin(
             break
 
         return sorted(selected, key=self._record_sort_key, reverse=reverse)
+
+    def _limit_query_record_context(self, record: dict[str, Any]) -> dict[str, Any]:
+        """按当前查询配置裁剪单条记录，不修改数据库里读出的原对象。"""
+        limited = dict(record)
+        context_limit = self._query_context_max_messages()
+        before = list(record.get("before") or [])
+        after = list(record.get("after") or [])
+        limited["before"] = before[-context_limit:]
+        limited["after"] = after[:context_limit]
+        return limited
 
     def _trim_record_context(
         self, record: dict[str, Any], max_messages: int, *, context_mode: str = "auto"

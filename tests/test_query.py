@@ -365,6 +365,80 @@ def test_build_blocks_respects_context_mode() -> None:
     check(_message_count(plugin._build_blocks([on], "我", "111111")) == 3, "不传 context_mode 时默认 auto")
 
 
+def test_build_blocks_keep_mention_context_ownership() -> None:
+    print("每次艾特独立成块，后一条艾特的前文不会串到前一条下面")
+    plugin = _plugin()
+    old = _record(
+        message_id="mention-old",
+        message="旧艾特",
+        time=1_700_000_000,
+        is_context=True,
+        before=[],
+        after=[],
+    )
+    new = _record(
+        message_id="mention-new",
+        message="新艾特",
+        time=1_700_100_000,
+        is_context=True,
+        before=[
+            {
+                "message_id": f"before-new-{index}",
+                "user_id": "333333",
+                "name": "小李",
+                "message": f"新艾特前文 {index}",
+                "time": 1_700_099_900 + index,
+            }
+            for index in range(1, 4)
+        ],
+        after=[],
+    )
+
+    blocks = plugin._build_blocks([new, old], "我", "111111", reverse=False, context_mode="auto")
+    old_messages = [msg.get("message") for msg in blocks[0]["msgs"]]
+    new_messages = [msg.get("message") for msg in blocks[1]["msgs"]]
+
+    check(len(blocks) == 2, "两次艾特得到两个独立块")
+    check(sum(bool(msg.get("is_at")) for msg in blocks[0]["msgs"]) == 1, "旧艾特块只含一个主艾特")
+    check(sum(bool(msg.get("is_at")) for msg in blocks[1]["msgs"]) == 1, "新艾特块只含一个主艾特")
+    check(old_messages == ["旧艾特"], "旧艾特下面没有混入新艾特的前文")
+    check(new_messages == ["新艾特前文 1", "新艾特前文 2", "新艾特前文 3", "新艾特"], "新艾特保留自己的前文")
+    check(all(block.get("record_start") is True for block in blocks), "每条艾特块都标记真实记录起点")
+
+
+def test_query_context_limit_applies_to_existing_records() -> None:
+    print("查询上下文配置调小后，已有记录也立即按每侧 N 条展示")
+    plugin = _plugin(query_context_max_messages=3)
+    record = _record(
+        is_context=True,
+        before=[{"message": f"前文 {index}"} for index in range(1, 7)],
+        after=[{"message": f"后文 {index}"} for index in range(1, 7)],
+    )
+
+    limited = plugin._limit_query_record_context(record)
+
+    check([item["message"] for item in limited["before"]] == ["前文 4", "前文 5", "前文 6"], "前文取离艾特最近的 3 条")
+    check([item["message"] for item in limited["after"]] == ["后文 1", "后文 2", "后文 3"], "后文取艾特之后最早的 3 条")
+    check(len(record["before"]) == 6 and len(record["after"]) == 6, "即时裁剪不改写数据库原记录")
+
+
+def test_chunk_blocks_only_marks_real_record_starts() -> None:
+    print("单条艾特跨页时不冒充新的艾特边界")
+    plugin = _plugin(max_messages_per_image=2)
+    blocks = [
+        {"msgs": [{"message": "a"}, {"message": "b"}, {"message": "c"}], "record_start": True},
+        {"msgs": [{"message": "d"}], "record_start": True},
+    ]
+
+    chunks = plugin._chunk_blocks(blocks)
+    split_blocks = [block for chunk in chunks for block in chunk]
+    template = (Path(__file__).resolve().parents[1] / "templates" / "result.html").read_text(encoding="utf-8")
+
+    check([block.get("record_start") for block in split_blocks] == [True, False, True], "续块为 False，下一次艾特重新为 True")
+    check(">新消息<" not in template, "分割线不再带容易误导的文字")
+    check("not loop.first and block.record_start" in template, "模板只在页面内的真实记录边界前画线")
+
+
 def test_trim_record_context_respects_context_mode() -> None:
     print("放不下要裁剪时，也得按同一套 context_mode 规则裁")
     plugin = _plugin()
@@ -400,9 +474,11 @@ def test_records_show_context_flag() -> None:
 
 
 def test_context_record_reuses_the_parsed_message() -> None:
-    print("有上下文时，同一条艾特只解析一次，并复用到记录和前文缓存")
-    plugin = _plugin()
-    plugin.before_cache = {"10001": [{"message": "上一条"}]}
+    print("有上下文时，同一条艾特只解析一次，查询前文严格按配置截取")
+    plugin = _plugin(query_context_max_messages=3)
+    plugin.before_cache = {
+        "10001": [{"message": f"前文 {index}"} for index in range(1, 7)]
+    }
     plugin.after_tasks = {}
     plugin.reminder_after_tasks = {}
     plugin._message_count_epoch = "test-epoch"
@@ -465,18 +541,30 @@ def test_context_record_reuses_the_parsed_message() -> None:
     check(current["message"] == "上下文原消息", "前文缓存里的当前消息没有被改写")
     check(current["at_targets"] == ["old-target"], "前文缓存的 at 目标没有被改写")
     check(appended[0]["message"] == "这是艾特目标后的正文", "目标记录保留正确的艾特正文")
-    check(appended[0]["before"] == [{"message": "上一条"}], "目标记录带上已有前文")
+    check(
+        appended[0]["before"] == [
+            {"message": "前文 4"},
+            {"message": "前文 5"},
+            {"message": "前文 6"},
+        ],
+        "提醒缓存即使更长，目标记录也只带配置要求的最近 3 条前文",
+    )
 
 
 def test_successful_query_sends_only_images() -> None:
     print("查询渲染成功时只发送结果图片，不额外刷等待或摘要文字")
-    plugin = _plugin(query_recent_count=2)
+    plugin = _plugin(query_recent_count=2, query_context_max_messages=3)
     event = _Event("111111")
     event.plain_results = []
     event.plain_result = lambda text: event.plain_results.append(text) or {"plain": text}
-    record = _record(is_context=True)
+    record = _record(
+        is_context=True,
+        before=[{"message": f"前文 {index}"} for index in range(1, 7)],
+        after=[{"message": f"后文 {index}"} for index in range(1, 7)],
+    )
     sent_images: list[list[str]] = []
     cleaned: list[set[str]] = []
+    prepared_batches: list[list[dict[str, Any]]] = []
 
     async def get_records(group_id, target):
         return [record] if target == "111111" else []
@@ -488,6 +576,7 @@ def test_successful_query_sends_only_images() -> None:
         return records
 
     async def prepare_records(records):
+        prepared_batches.append(records)
         return records, {"temporary-image"}
 
     async def group_name(event, group_id):
@@ -537,6 +626,10 @@ def test_successful_query_sends_only_images() -> None:
     check(sent_images == [["query-result.jpg"]], "只发送一张结果图")
     check(event.plain_results == [], "没有等待提示或文字摘要")
     check(cleaned == [{"temporary-image"}], "查询结束后仍会回收临时图片")
+    check(
+        len(prepared_batches[0][0]["before"]) == 3 and len(prepared_batches[0][0]["after"]) == 3,
+        "查询入口在下载图片和渲染之前就把已有记录限制为前后各 3 条",
+    )
 
 
 def test_self_alias_pattern_is_narrow() -> None:
@@ -558,6 +651,9 @@ def main_() -> int:
         test_always_mode_captures_future_query_context,
         test_never_mode_does_not_capture_query_context,
         test_build_blocks_respects_context_mode,
+        test_build_blocks_keep_mention_context_ownership,
+        test_query_context_limit_applies_to_existing_records,
+        test_chunk_blocks_only_marks_real_record_starts,
         test_trim_record_context_respects_context_mode,
         test_records_show_context_flag,
         test_context_record_reuses_the_parsed_message,

@@ -427,20 +427,11 @@
       font-weight: 800;
     }
     .block-divider {
-      display: flex;
-      align-items: center;
-      color: #0f9fff;
-      font-size: 12px;
-      margin: 14px 0 25px 0;
-      font-weight: 500;
+      height: 1px;
+      margin: 18px 0 24px;
+      background: #67bdf2;
+      opacity: 0.82;
     }
-    .block-divider::before, .block-divider::after {
-      content: "";
-      flex: 1;
-      border-bottom: 1px solid #0f9fff;
-    }
-    .block-divider::before { margin-right: 15px; }
-    .block-divider::after { margin-left: 15px; }
     .footer-wrapper {
       margin-top: auto;
       padding: 0;
@@ -473,6 +464,7 @@
     </div>
     <div class="chat-area">
       {% for block in blocks %}
+        {% if not loop.first and block.record_start %}<div class="block-divider" aria-hidden="true"></div>{% endif %}
         <div class="msg-block">
           {% for msg in block.msgs %}
             <div class="msg-item">
@@ -563,7 +555,6 @@
             </div>
           {% endfor %}
         </div>
-        {% if not loop.last %}<div class="block-divider">新消息</div>{% endif %}
       {% endfor %}
     </div>
     <div class="footer-wrapper">

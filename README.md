@@ -8,7 +8,7 @@
 
 内置自动清理与存储配额 —— 装上之后，不用再操心它悄悄吃掉多少硬盘。
 
-[![version](https://img.shields.io/badge/version-v1.3.0-1e6fff?style=flat-square)](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases)
+[![version](https://img.shields.io/badge/version-v1.3.1-1e6fff?style=flat-square)](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%E2%89%A54.16%20%3C5-0f9fff?style=flat-square)](https://github.com/AstrBotDevs/AstrBot)
 [![license](https://img.shields.io/badge/license-MIT-28c2d1?style=flat-square)](LICENSE)
 [![CI](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/actions/workflows/ci.yml/badge.svg)](https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/actions/workflows/ci.yml)
@@ -135,7 +135,8 @@ git clone https://github.com/Whereis-Alice/astrbot_plugin_mention_echo.git
 
 - 上下文得**先存下来才看得到**。`始终展示` 会从设置生效后的新消息开始自动采集；`跟随群设置` 则需要群管 / 主人先发一次 `开启艾特上下文`。两种方式都**不能把历史补回来**。
 - `从不展示` 会停止为手动查询采集新的上下文；群里的上下文开关会保留，日后改回“跟随群设置”时仍可继续使用。它不影响提醒上下文。
-- 前后各取几条由 `record.查询上下文条数` 决定，默认前后各 5 条。历史查询只会展示当时已经写进记录的内容。
+- 前后各取几条由 `record.查询上下文条数` 决定，默认前后各 5 条。调小后会立即限制已有记录的查询显示，之后的新记录也只保存该数量；调大无法补回过去没有采集的群消息。
+- 每次艾特及其前后文都是独立片段，片段之间用无文字分割线隔开，避免把后一条艾特的前文误认成上一条的后文。
 - 想让 `谁艾特我` 默认就是补课视图，把 `record.查询默认只看最近多少次艾特` 设成 3。命令里写的数字优先级更高。
 - **查询上下文和提醒上下文不是同一个开关。** `record` 的查询上下文用于手动 `谁艾特我`；`reminder.默认开启提醒截图上下文` 只用于“你回群后自动补发”的提醒队列。两者可以同时开启，互不覆盖，前后文条数也各自独立。
 - 因此，只打开“默认开启提醒截图上下文”并不会让手动查询带上群聊记录；希望自动补课，请把查询上下文设为 `始终展示`。
@@ -309,7 +310,7 @@ astrbot_plugin_mention_echo/
 | 图片缓存保留小时数 | 24 | 0 或更小 = 禁用这项定时清理 |
 | 单张图最多几条消息 | 12 | 超了自动分页 |
 | 单次查询最多几页 | 0 | 0 = 不限制 |
-| 查询上下文条数 | 5 | 每次艾特前后各最多多少条；只对之后采集的新消息生效 |
+| 查询上下文条数 | 5 | 每次艾特的前文、后文各最多多少条；调小立即限制查询显示和后续保存，调大不能补回历史 |
 | 查询时是否连带艾特前后的群聊记录 | 跟随群设置 | `跟随群设置` = 需要群管发过 `开启艾特上下文`；`始终展示` = 从设置生效后自动采集并展示新艾特的上下文；`从不展示` = 只看被 @ 的那一条。历史不能补录，**只影响查询** |
 | 查询默认只看最近多少次艾特 | 0 | 0 = 全部记录（分页）。设成 3 就等于 `谁艾特我` 默认只看最近 3 次；成功时仍只发结果图片，命令里写的数字优先 |
 | 排序方式 | 正序 | 正序 = 旧的在上；倒序 = 最新的在上 |

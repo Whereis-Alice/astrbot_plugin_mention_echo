@@ -7,6 +7,22 @@
 
 ## [Unreleased]
 
+## [v1.3.1] - 2026-09-08
+
+主题：**上下文条数严格生效，多次艾特不再串段。**
+
+### 修复
+
+- 修复 `查询上下文最多缓存消息条数` 会被提醒上下文缓存上限间接放大的问题。比如查询配置为 3、提醒缓存为 6 时，
+  新艾特现在只会保存最近 3 条前文；查询已有记录时也会立即把前后文各限制为 3 条。
+- 修复多次艾特共用一条全局时间线导致的上下文错位。每次艾特及其前后文现在独立成块，
+  下一次艾特的前文不会再显示在上一次艾特下面。
+- 记录之间改用简洁的无文字分割线；同一条艾特因分页拆开的续块不会被误画成新的艾特边界。
+
+### 测试
+
+- 新增查询条数、已有记录即时裁剪、上下文归属和分页续块标记的回归用例。
+
 ## [v1.3.0] - 2026-09-08
 
 主题：**让“补课上下文”真的能存下来，查询不再刷屏。**
@@ -184,7 +200,8 @@ v1.0.4 重构而来，独立命名空间，可与原插件共存于同一目录�
 - 权限门禁收紧：破坏性命令（`清除全部艾特数据` / `艾特清理`）要求机器人管理员，
   群级配置命令要求群管理员，只读命令不设门禁。
 
-[Unreleased]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/compare/v1.3.1...HEAD
+[v1.3.1]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.3.1
 [v1.3.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.3.0
 [v1.2.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.2.0
 [v1.1.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.1.0
