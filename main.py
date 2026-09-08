@@ -364,7 +364,24 @@ class MentionEchoPlugin(
             if not self._is_admin(event):
                 return [event.plain_result("只有群管或主人可以操作哦")]
             await self._set_context(group_id, True)
-            return [event.plain_result("已开启本群艾特上下文记录，将记录艾特前后各5条消息。")]
+            context_mode = self._query_context_mode()
+            if context_mode == "never":
+                return [
+                    event.plain_result(
+                        "已保存本群艾特上下文开关；但当前查询配置为「从不展示」，不会采集。"
+                    )
+                ]
+            if context_mode == "always":
+                return [
+                    event.plain_result(
+                        "已开启本群艾特上下文记录；当前配置为「始终展示」，新消息也会自动采集。"
+                    )
+                ]
+            return [
+                event.plain_result(
+                    "已开启本群艾特上下文记录；之后的新艾特会保存前后消息，查询时按配置裁剪。"
+                )
+            ]
 
         if CONTEXT_OFF_PATTERN.match(stripped):
             if not self._is_admin(event):
@@ -372,6 +389,12 @@ class MentionEchoPlugin(
             await self._set_context(group_id, False)
             self.before_cache.pop(group_id, None)
             self.after_tasks.pop(group_id, None)
+            if self._query_context_mode() == "always":
+                return [
+                    event.plain_result(
+                        "已关闭本群上下文开关；但查询配置为「始终展示」，新消息仍会自动采集。"
+                    )
+                ]
             return [event.plain_result("已关闭本群艾特上下文记录。")]
 
         if REMINDER_GROUP_ON_PATTERN.match(stripped):
@@ -657,6 +680,13 @@ class MentionEchoPlugin(
             append_to_cache=False,
         )
         context_on = bool(context_state.get("context_on"))
+        query_context_on = bool(context_state.get("query_context_on"))
+        fallback_record_context_on = query_context_on or (
+            context_on and self._query_context_mode() != "never"
+        )
+        record_context_on = bool(
+            context_state.get("record_context_on", fallback_record_context_on)
+        )
         reminder_context = context_state["reminder_context"]
         reminder_context_on = bool(context_state.get("reminder_context_on"))
         sender_info = context_state["sender_info"]
@@ -667,18 +697,36 @@ class MentionEchoPlugin(
         self_id = self._self_id(event)
         targets = [target for target in mentions if target not in {self._sender_id(event), self_id}]
         if targets:
-            before = list(self.before_cache.get(group_id, [])) if context_on else []
+            before = list(self.before_cache.get(group_id, [])) if record_context_on else []
             reminder_before_count = int(reminder_context.get("before", 1))
             reminder_before = (
                 list(self.before_cache.get(group_id, []))[-reminder_before_count:]
                 if reminder_context_on and reminder_before_count > 0
                 else []
             )
-            record = await self._mention_record(event, group_id, targets, sender_info, quote)
+            # 上下文模式开启时，current 就是同一条艾特记录的已解析版本。
+            # 直接复用它，避免同一消息重复解析图片并打印两条 diagnostic 日志。
+            record = dict(current) if isinstance(current, dict) else None
+            if record is None:
+                record = await self._mention_record(event, group_id, targets, sender_info, quote)
+            else:
+                # ``current`` 仍要留在 before_cache 里作为一条干净的群聊消息。
+                # 这里只补回原记录路径按「实际被记录目标」计算的展示字段。
+                record["message"] = self._message_text_for_record(event, targets)
+                record["at_targets"] = [str(item) for item in targets]
+                record["at_after_image"] = self._mention_after_image(event, targets)
+                if record["at_after_image"]:
+                    record.pop("message_after_images", None)
+                else:
+                    message_after_images = self._message_after_images(event, targets)
+                    if message_after_images:
+                        record["message_after_images"] = message_after_images
+                    else:
+                        record.pop("message_after_images", None)
             record["message_sequence"] = self._event_message_sequence(event)
             record["group_message_count"] = self._event_group_message_count(event, group_id)
             record["message_count_epoch"] = self._message_count_epoch
-            if context_on:
+            if record_context_on:
                 record["is_context"] = True
                 record["before"] = before
                 record["after"] = []
@@ -705,7 +753,7 @@ class MentionEchoPlugin(
                             "limit": int(reminder_context.get("after", 0)),
                         }
                     )
-                if context_on:
+                if record_context_on:
                     tasks = self.after_tasks.setdefault(group_id, [])
                     tasks.append({"target": target, "time": target_record["time"], "count": 0})
 
@@ -738,9 +786,17 @@ class MentionEchoPlugin(
         append_to_cache: bool,
     ) -> dict[str, Any]:
         context_on = await self._context_enabled(group_id)
+        query_context_on = self._query_context_capture_enabled()
+        # 三态配置同时控制采集和展示：
+        # - always：不依赖群开关，自动为之后的新消息采集；
+        # - auto：只跟随群里的「开启艾特上下文」；
+        # - never：不为手动查询解析或保存上下文，避免无用的内存与磁盘开销。
+        record_context_on = query_context_on or (
+            context_on and self._query_context_mode() != "never"
+        )
         reminder_context = await self._reminder_context_config(group_id)
         reminder_context_on = bool(reminder_context.get("enabled"))
-        needs_context = context_on or reminder_context_on
+        needs_context = record_context_on or reminder_context_on
         sender_info = (
             await self._member_info(event, group_id, self._sender_id(event))
             if mentions or needs_context
@@ -749,9 +805,20 @@ class MentionEchoPlugin(
         quote = await self._quote(event) if mentions or needs_context else None
         current = await self._context_message(event, group_id, mentions, sender_info, quote) if needs_context else None
         if current:
-            current = await self._cache_record_images(current)
+            # 普通群消息只是暂存在滚动前文缓存里，没必要立刻把它的原图落盘。
+            # 只有当前消息会成为正式艾特记录，或正被已有艾特作为后文引用时，才保留
+            # 本地图片文件；否则仍把内联图片原文剥掉，保留 URL / 过期占位即可。
+            needs_image_cache = bool(
+                mentions
+                or self.after_tasks.get(group_id)
+                or self.reminder_after_tasks.get(group_id)
+            )
+            if needs_image_cache:
+                current = await self._cache_record_images(current)
+            else:
+                await self._externalize_record_images(current, allow_spill=False)
 
-        if context_on and current:
+        if record_context_on and current:
             await self._append_after_context(group_id, current)
         if reminder_context_on and current:
             await self._append_reminder_after_context(group_id, current)
@@ -760,6 +827,8 @@ class MentionEchoPlugin(
 
         return {
             "context_on": context_on,
+            "query_context_on": query_context_on,
+            "record_context_on": record_context_on,
             "reminder_context": reminder_context,
             "reminder_context_on": reminder_context_on,
             "sender_info": sender_info,
@@ -1072,8 +1141,8 @@ class MentionEchoPlugin(
             {
                 "title": "上下文",
                 "items": [
-                    {"command": "开启艾特上下文 / 关闭艾特上下文", "desc": "管理员控制查询截图是否记录艾特前后消息。"},
-                    {"command": "#开启提醒上下文 / #关闭提醒上下文", "desc": "管理员控制提醒截图是否带上下文。"},
+                    {"command": "开启艾特上下文 / 关闭艾特上下文", "desc": "管理员控制手动查询是否采集艾特前后消息。"},
+                    {"command": "#开启提醒上下文 / #关闭提醒上下文", "desc": "管理员控制回群提醒截图是否带上下文，和查询独立。"},
                     {"command": "#设置提醒上下文 2,2", "desc": "设置提醒截图前后上下文条数。"},
                 ],
             },
@@ -1292,27 +1361,6 @@ class MentionEchoPlugin(
         at_prefix = f"@{target_name} " if msg.get("is_at") else ""
         return f"{prefix}{at_prefix}{message}{suffix}".strip()
 
-    async def _query_waiting_text(
-        self,
-        event: AstrMessageEvent,
-        group_id: str,
-        target: str,
-        target_name: str,
-    ) -> str:
-        waiting_template = self._config_str("message", "waiting_text_template", default="让{bot_name}看看谁艾特过你哦，稍等一下~")
-        if not waiting_template.strip():
-            return ""
-        is_self_query = target == self._sender_id(event)
-        target_pronoun = "你" if is_self_query else "ta"
-        if not is_self_query and waiting_template == "让{bot_name}看看谁艾特过你哦，稍等一下~":
-            waiting_template = "让{bot_name}看看谁艾特过ta哦，稍等一下~"
-        return self._format_template(
-            waiting_template,
-            bot_name=await self._bot_name(event, group_id),
-            target_name=target_name,
-            target_pronoun=target_pronoun,
-        ).strip()
-
     async def _query(
         self,
         event: AstrMessageEvent,
@@ -1323,9 +1371,9 @@ class MentionEchoPlugin(
     ) -> list[Any]:
         """唯一的查询入口。
 
-        不带条数就是原来的「谁艾特我」：全部记录、分页出图、先回一句等待提示。
+        不带条数就是原来的「谁艾特我」：全部记录、分页出图。
         带条数（``谁艾特我 3``，或配置了 ``query_recent_count``）就是「补课视图」：
-        只看最近 N 次艾特，等待提示换成一行摘要，和图片一起发出去。
+        只看最近 N 次艾特。查询成功时统一只发送结果图片；只有无法出图时才使用文字降级。
         上下文带不带由 ``query_context_mode`` 决定，跟提醒路径互不影响。
         """
         target = self._query_target(event, text, mentions)
@@ -1348,11 +1396,6 @@ class MentionEchoPlugin(
 
         if recent > 0:
             records = sorted(records, key=self._record_sort_key, reverse=True)[:recent]
-            lead_text = self._query_recap_summary(records, total_records, context_mode)
-        else:
-            lead_text = await self._query_waiting_text(event, group_id, target, target_name)
-        # 全量查询时先回一句「稍等」；只看最近 N 次时摘要和图一起发，省一条消息。
-        send_lead_first = recent <= 0
 
         records = self._select_query_records(
             records,
@@ -1363,8 +1406,6 @@ class MentionEchoPlugin(
         )
         records = await self._resolve_record_pokes(event, group_id, records)
         if text_only:
-            if lead_text and not await self._try_send(event, event.plain_result(lead_text)):
-                return [event.plain_result(lead_text)]
             if await self._try_send_records_forward_text(
                 event, records, target_name, context_mode=context_mode
             ):
@@ -1385,10 +1426,6 @@ class MentionEchoPlugin(
             ):
                 return []
             return [event.plain_result(self._records_forward_unavailable_text())]
-
-        if send_lead_first and lead_text and not await self._try_send(event, event.plain_result(lead_text)):
-            self._delete_cached_image_paths(temporary_image_paths)
-            return [event.plain_result(lead_text)]
 
         image_paths: list[str] = []
         group_name = await self._group_name(event, group_id)
@@ -1416,13 +1453,8 @@ class MentionEchoPlugin(
                 ]
             )
 
-            if not send_lead_first and lead_text:
-                if not await self._try_send_text_images(event, lead_text, image_paths):
-                    await self._try_send(event, event.plain_result(lead_text))
-                    for image_path in image_paths:
-                        if not await self._try_send(event, event.image_result(image_path)):
-                            raise RuntimeError(f"发送图片失败: {image_path}")
-            elif not await self._try_send_images(event, image_paths):
+            # 查询成功时只发送结果图，不额外发送等待提示或文字摘要，避免刷屏。
+            if not await self._try_send_images(event, image_paths):
                 for image_path in image_paths:
                     if not await self._try_send(event, event.image_result(image_path)):
                         raise RuntimeError(f"发送图片失败: {image_path}")
@@ -1446,23 +1478,6 @@ class MentionEchoPlugin(
             except ValueError:
                 pass
         return self._query_recent_count()
-
-    def _query_recap_summary(
-        self, records: list[dict[str, Any]], total: int, context_mode: str
-    ) -> str:
-        """「只看最近 N 次」时替代等待提示的一行摘要。"""
-        newest = max((self._record_time(record) for record in records), default=0)
-        lines = [
-            f"艾特回顾 · 最近 {len(records)} 次（共 {total} 条记录）",
-            f"最近一次：{self._ago_text(newest)}",
-        ]
-        if context_mode == "never":
-            lines.append("提示：当前配置为「从不展示上下文」，只会看到被艾特的那一条。")
-        elif not any(record.get("before") or record.get("after") for record in records):
-            lines.append(
-                "提示：这几条还没存下群聊上下文。管理员发送「开启艾特上下文」，之后的艾特就会连带前后消息。"
-            )
-        return "\n".join(lines)
 
     def _records_show_context(self, records: list[dict[str, Any]], context_mode: str) -> bool:
         """这批记录最终会不会展示上下文（只用于出图时的表头提示）。"""
@@ -1526,21 +1541,6 @@ class MentionEchoPlugin(
         if len(ranking) > RANK_TOP_N:
             lines.append(f"（仅显示前 {RANK_TOP_N} 名）")
         return [event.plain_result("\n".join(lines))]
-
-    def _ago_text(self, timestamp: int) -> str:
-        stamp = int(timestamp or 0)
-        if stamp <= 0:
-            return "时间未知"
-        delta = max(0, int(time.time()) - stamp)
-        if delta < 60:
-            return "刚刚"
-        if delta < 3600:
-            return f"{delta // 60} 分钟前"
-        if delta < 86400:
-            return f"{delta // 3600} 小时前"
-        if delta < 86400 * 30:
-            return f"{delta // 86400} 天前（{self._rank_time_text(stamp)}）"
-        return self._rank_time_text(stamp)
 
     def _rank_time_text(self, timestamp: int) -> str:
         if timestamp <= 0:

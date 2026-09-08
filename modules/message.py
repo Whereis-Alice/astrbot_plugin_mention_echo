@@ -323,10 +323,10 @@ class MessageMixin:
         raw_segments = self._raw_message_segments(event)
         if raw_segments:
             for segment in raw_segments:
-                if str(segment.get("type", "")).lower() != "at":
+                if self._segment_type(segment) not in {"at", "mention", "mention_user"}:
                     continue
-                data = segment.get("data") or {}
-                value = data.get("qq") or data.get("user_id") or data.get("target") or data.get("id")
+                data = self._segment_data(segment)
+                value = self._first_mapping_value(data, ["qq", "user_id", "userId", "target", "id"])
                 self._append_mention(result, value)
 
         for item in self._message_chain(event):
@@ -456,16 +456,27 @@ class MessageMixin:
 
     def _raw_message_texts(self, event: AstrMessageEvent) -> list[str]:
         result = []
-        raw = getattr(event.message_obj, "raw_message", None)
+        message_obj = getattr(event, "message_obj", None)
+        raw = getattr(message_obj, "raw_message", None)
         values = [
             raw,
-            getattr(event.message_obj, "message_str", None),
+            getattr(message_obj, "message_str", None),
             getattr(event, "message_str", None),
         ]
-        if isinstance(raw, dict):
+        for payload in self._raw_event_mappings(event):
             values.extend(
-                self._first_mapping_value(raw, [key])
-                for key in ("raw_message", "rawMessage", "message", "message_str", "messageStr", "content")
+                self._first_mapping_value(payload, [key])
+                for key in (
+                    "raw_message",
+                    "rawMessage",
+                    "message",
+                    "message_str",
+                    "messageStr",
+                    "message_chain",
+                    "messageChain",
+                    "chain",
+                    "content",
+                )
             )
         for value in values:
             if isinstance(value, str) and value.strip():
@@ -640,15 +651,54 @@ class MessageMixin:
         return not mentions or text in {str(item) for item in mentions}
 
     def _raw_message_segments(self, event: AstrMessageEvent) -> list[dict[str, Any]]:
-        raw = getattr(event.message_obj, "raw_message", None)
-        if isinstance(raw, list):
-            return [segment for segment in raw if isinstance(segment, dict)]
-        if not isinstance(raw, dict):
-            return []
-        segments = raw.get("message") or raw.get("message_chain") or []
-        if isinstance(segments, dict):
-            segments = self._segments_from_value(segments)
-        return [segment for segment in segments if isinstance(segment, dict)]
+        message_obj = getattr(event, "message_obj", None)
+        values: list[Any] = [getattr(message_obj, "raw_message", None)]
+        values.extend(self._raw_event_mappings(event))
+        seen: set[int] = set()
+        for raw in values:
+            if raw is None or id(raw) in seen:
+                continue
+            seen.add(id(raw))
+            if isinstance(raw, list):
+                segments: Any = raw
+            elif isinstance(raw, dict):
+                segments = (
+                    raw.get("message")
+                    or raw.get("message_chain")
+                    or raw.get("messageChain")
+                    or raw.get("chain")
+                    or raw.get("content")
+                    or raw
+                )
+            elif isinstance(raw, (str, tuple)):
+                segments = raw
+            else:
+                continue
+            if isinstance(segments, (dict, str, tuple)):
+                segments = self._segments_from_value(segments)
+            parsed = [segment for segment in segments if isinstance(segment, dict)] if isinstance(segments, list) else []
+            if parsed:
+                return parsed
+        return []
+
+    def _raw_event_mappings(self, event: AstrMessageEvent) -> list[dict[str, Any]]:
+        """收集不同 OneBot 适配器可能暴露的原始事件映射。"""
+        message_obj = getattr(event, "message_obj", None)
+        values = (
+            getattr(message_obj, "raw_message", None),
+            getattr(message_obj, "raw_event", None),
+            getattr(event, "raw_event", None),
+            getattr(event, "raw", None),
+            getattr(event, "data", None),
+        )
+        result: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for value in values:
+            if not isinstance(value, dict) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            result.append(value)
+        return result
 
     def _message_chain(self, event: AstrMessageEvent) -> list[Any]:
         if hasattr(event, "get_messages"):
@@ -659,7 +709,15 @@ class MessageMixin:
         return list(getattr(event.message_obj, "message", []) or [])
 
     def _message_text(self, event: AstrMessageEvent) -> str:
-        return str(getattr(event, "message_str", "") or getattr(event.message_obj, "message_str", "") or "").strip()
+        value = getattr(event, "message_str", "") or getattr(event.message_obj, "message_str", "")
+        if not value:
+            getter = getattr(event, "get_message_str", None)
+            if callable(getter):
+                try:
+                    value = getter()
+                except Exception:
+                    value = ""
+        return str(value or "").strip()
 
     def _message_text_for_record(self, event: AstrMessageEvent, mentions: list[str]) -> str:
         include_at = not mentions
@@ -981,8 +1039,19 @@ class MessageMixin:
         return cls_name in IMAGE_SEGMENT_TYPES or any(token in cls_name for token in ("image", "picture", "photo"))
 
     def _segments_from_value(self, value: Any) -> list[Any]:
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("[") or text.startswith("{"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError):
+                    return []
+                return self._segments_from_value(parsed)
+            return []
         if isinstance(value, list):
             return value
+        if isinstance(value, tuple):
+            return list(value)
         if isinstance(value, dict):
             nested = self._first_mapping_value(value, ["message", "message_chain", "messageChain", "content"])
             if nested is not None and nested is not value:
@@ -1366,6 +1435,8 @@ class MessageMixin:
         *,
         kind: str,
     ) -> None:
+        if not self._image_diagnostics_enabled():
+            return
         raw_segments = self._raw_message_segments(event)
         chain_segments = self._message_chain(event)
         raw_texts = self._raw_message_texts(event)
@@ -1403,6 +1474,8 @@ class MessageMixin:
         *,
         page_count: int,
     ) -> None:
+        if not self._image_diagnostics_enabled():
+            return
         image_records = 0
         cached_records = 0
         media_records = 0
@@ -1742,21 +1815,65 @@ class MessageMixin:
         return normalized
 
     def _group_id(self, event: AstrMessageEvent) -> str:
-        return str(getattr(event.message_obj, "group_id", "") or "")
+        getter = getattr(event, "get_group_id", None)
+        if callable(getter):
+            try:
+                value = getter()
+                if value:
+                    return str(value)
+            except Exception:
+                pass
+
+        message_obj = getattr(event, "message_obj", None)
+        for name in ("group_id", "groupId"):
+            value = getattr(message_obj, name, None)
+            if value:
+                return str(value)
+
+        for raw in (
+            getattr(message_obj, "raw_message", None),
+            getattr(event, "raw_event", None),
+            getattr(event, "raw", None),
+            getattr(event, "data", None),
+        ):
+            if not isinstance(raw, dict):
+                continue
+            for name in ("group_id", "groupId", "group_code", "groupCode"):
+                value = raw.get(name)
+                if value:
+                    return str(value)
+            group = raw.get("group")
+            if isinstance(group, dict):
+                value = group.get("group_id") or group.get("groupId") or group.get("id")
+                if value:
+                    return str(value)
+        return ""
 
     def _sender_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, "get_sender_id"):
             try:
-                return str(event.get_sender_id())
+                value = event.get_sender_id()
+                if value is not None and str(value).strip():
+                    return str(value)
             except Exception:
                 pass
-        sender = getattr(event.message_obj, "sender", None)
-        return str(
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None)
+        value = (
             getattr(sender, "user_id", "")
             or getattr(sender, "id", "")
+            or getattr(message_obj, "sender_id", "")
+            or getattr(message_obj, "userId", "")
             or self._raw_sender_value(event, "user_id")
-            or ""
+            or self._raw_sender_value(event, "userId")
         )
+        if value is not None and str(value).strip():
+            return str(value)
+        for raw in self._raw_event_mappings(event):
+            value = self._first_mapping_value(raw, ["user_id", "userId", "sender_id", "senderId"])
+            if value is not None and str(value).strip():
+                return str(value)
+        return ""
 
     def _sender_name(self, event: AstrMessageEvent) -> str:
         if hasattr(event, "get_sender_name"):
@@ -1872,11 +1989,15 @@ class MessageMixin:
         return role in {"admin", "owner", "administrator", "master"}
 
     def _raw_sender_value(self, event: AstrMessageEvent, key: str) -> Any:
-        raw = getattr(event.message_obj, "raw_message", None)
-        if isinstance(raw, dict):
+        for raw in self._raw_event_mappings(event):
             sender = raw.get("sender")
             if isinstance(sender, dict):
-                return sender.get(key)
+                value = sender.get(key)
+                if value is not None:
+                    return value
+            value = raw.get(key)
+            if value is not None:
+                return value
         return None
 
     def _first_attr(self, obj: Any, names: list[str]) -> Any:

@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import shutil
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -49,6 +51,7 @@ _ensure_astrbot()
 
 from modules.constants import IMAGE_EXPIRED_REF, IMAGE_REF_PREFIX  # noqa: E402
 from modules.data import DataMixin  # noqa: E402
+from modules.maintenance import _normalize_path, _sweep_images_sync  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -116,6 +119,27 @@ def _cache_files(root: Path) -> list[Path]:
     return sorted(p for p in cache_dir.rglob("*") if p.is_file()) if cache_dir.exists() else []
 
 
+def _reclaim_orphans(harness: _Harness, root: Path, records: list[dict[str, object]]) -> None:
+    """在临时测试目录中模拟一轮完整的孤儿图片回收。"""
+    referenced: set[str] = set()
+    for record in records:
+        referenced.update(
+            normalized
+            for path in harness._record_image_cache_paths(record)
+            if (normalized := _normalize_path(path))
+        )
+    # 测试不等待生产环境的宽限期，传未来时间使当前孤儿立刻符合回收条件。
+    now = time.time()
+    _sweep_images_sync(
+        root / "message_images",
+        referenced,
+        expire_before=0,
+        orphan_before=now + 1,
+        quota_bytes=0,
+        grace_before=now + 1,
+    )
+
+
 # ---------------------------------------------------------------- 落盘 + 引用化
 
 
@@ -169,8 +193,8 @@ def test_no_double_store() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_drop_releases_images_and_files() -> None:
-    print("\nbug 2 回归：清理必须同时释放 images 与磁盘文件")
+def test_drop_releases_images_and_defers_file_cleanup() -> None:
+    print("\nbug 2 回归：清理必须同时释放 images，物理文件交给孤儿巡检")
     harness, root = _harness()
     try:
         record = {"sender": "1", "images": [_inline_png(20_000)]}
@@ -183,7 +207,9 @@ def test_drop_releases_images_and_files() -> None:
             cached.get("images") == [IMAGE_EXPIRED_REF],
             f"images 被换成过期占位而不是留着（实际 {cached.get('images')}）",
         )
-        check(len(_cache_files(root)) == 0, "磁盘上的图片文件被真正删除")
+        check(len(_cache_files(root)) == 1, "共享安全：单条清理不会直接删掉可能仍被其他记录引用的文件")
+        _reclaim_orphans(harness, root, [])
+        check(len(_cache_files(root)) == 0, "没有任何记录引用后，孤儿巡检会删除磁盘文件")
         check(not harness._record_has_image_content(cached), "全过期的记录不再占用「保留原图」名额")
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -237,7 +263,47 @@ def test_nested_context_is_externalized() -> None:
         check(cached["quote"]["images"] == [IMAGE_EXPIRED_REF], "quote.images 已释放")
         check(cached["before"][0]["images"] == [IMAGE_EXPIRED_REF], "before[].images 已释放")
         check(cached["after"][0]["images"] == [IMAGE_EXPIRED_REF], "after[].images 已释放")
-        check(len(_cache_files(root)) == 0, "嵌套位置的磁盘文件也被删干净")
+        _reclaim_orphans(harness, root, [])
+        check(len(_cache_files(root)) == 0, "嵌套位置的孤儿图片也被巡检删干净")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_shared_refs_survive_pending_reminder_cleanup() -> None:
+    print("\n共享引用回归：提醒送达后不能删掉正式记录还在用的图片")
+    harness, root = _harness()
+    try:
+        primary = asyncio.run(harness._cache_record_images({"images": [_inline_png(22_000)]}))
+        pending = copy.deepcopy(primary)
+        reference = str((primary.get("images") or [""])[0])
+        path = harness._image_ref_to_path(reference)
+        check(path is not None and path.exists(), "前置条件：正式记录指向本地图片")
+
+        harness._drop_record_image_cache(pending, delete_files=True)
+        check(path is not None and path.exists(), "清理待发提醒不会提前删除正式记录的共享图片")
+        _reclaim_orphans(harness, root, [primary])
+        check(path is not None and path.exists(), "全局巡检看到正式记录仍引用后会保留文件")
+
+        harness._drop_record_image_cache(primary, delete_files=True)
+        _reclaim_orphans(harness, root, [])
+        check(path is not None and not path.exists(), "最后一个引用释放后，孤儿巡检回收文件")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_missing_cache_ref_becomes_expired_placeholder() -> None:
+    print("\n缓存过期回归：找不到的 mecache 引用要显示过期占位，不能静默空白")
+    harness, root = _harness()
+    try:
+        cached = asyncio.run(harness._cache_record_images({"images": [_inline_png(18_000)]}))
+        reference = str((cached.get("images") or [""])[0])
+        path = harness._image_ref_to_path(reference)
+        check(path is not None and path.exists(), "前置条件：引用对应缓存文件存在")
+        if path is not None:
+            path.unlink()
+
+        prepared = asyncio.run(harness._cache_record_images(copy.deepcopy(cached), force=True))
+        check(prepared.get("images") == [IMAGE_EXPIRED_REF], "失效引用会转换成图片已过期占位")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -359,6 +425,7 @@ def test_keep_window_bounds_disk_usage() -> None:
 
         pruned = harness._prune_record_image_caches(records)
         harness._drop_records_image_cache(pruned, delete_files=True)
+        _reclaim_orphans(harness, root, records)
 
         live = [r for r in records if harness._record_has_image_content(r)]
         check(len(live) == 5, f"只有最近 5 条还持有原图（实际 {len(live)}）")
@@ -381,10 +448,12 @@ def main() -> int:
     for test in (
         test_externalize_spills_bytes_to_disk,
         test_no_double_store,
-        test_drop_releases_images_and_files,
+        test_drop_releases_images_and_defers_file_cleanup,
         test_drop_keeps_http_links,
         test_no_spill_when_window_closed,
         test_nested_context_is_externalized,
+        test_shared_refs_survive_pending_reminder_cleanup,
+        test_missing_cache_ref_becomes_expired_placeholder,
         test_gate_blocks_base64,
         test_gate_catches_bare_base64,
         test_long_text_is_truncated,

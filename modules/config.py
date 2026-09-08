@@ -93,6 +93,15 @@ class ConfigMixin:
             return "never"
         return "auto"
 
+    def _query_context_capture_enabled(self) -> bool:
+        """是否应为查询主动采集上下文。
+
+        ``始终展示`` 不只是出图时的显示偏好：如果只在查询阶段决定展示，
+        之前没有保存的上下文就永远无从展示。因此该模式也会让后续新消息
+        进入查询上下文缓存；历史记录仍不会被凭空补齐。
+        """
+        return self._query_context_mode() == "always"
+
     def _query_recent_count(self) -> int:
         """查询默认只看最近多少次艾特；0 = 全部记录（分页展示）。"""
         return max(
@@ -197,6 +206,10 @@ class ConfigMixin:
 
     def _llm_tool_enabled(self) -> bool:
         return self._config_bool("feature", "llm_tool_enabled", default=False)
+
+    def _image_diagnostics_enabled(self) -> bool:
+        """是否输出逐条图片解析诊断日志；默认关闭，避免每条艾特刷屏。"""
+        return self._config_bool("feature", "image_diagnostics_enabled", default=False)
 
     def _global_group_allowed(self, event: Any) -> bool:
         enabled_umos = self._global_enabled_group_umos()

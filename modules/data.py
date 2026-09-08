@@ -382,8 +382,13 @@ class DataMixin:
 
     async def _externalize_image_source(self, source: Any, *, allow_spill: bool) -> str:
         value = str(source or "").strip()
-        if not value or self._is_image_ref(value):
+        if not value:
             return value
+        if self._is_image_ref(value):
+            # 留盘窗口或容量巡检可能已经删掉对应文件。不能让失效引用静默穿过，
+            # 否则渲染会少一张图却没有「图片已过期」占位。
+            path = self._image_ref_to_path(value)
+            return value if path is not None and path.is_file() else IMAGE_EXPIRED_REF
         if not self._needs_externalizing(value):
             # http(s) 链接、短路径这类轻量引用可以直接进库。
             return value
@@ -1005,27 +1010,29 @@ class DataMixin:
         return False
 
     def _drop_record_image_cache(self, record: dict[str, Any], delete_files: bool) -> None:
-        cache = record.pop("image_cache", None)
-        if delete_files:
-            self._delete_image_cache_entries(cache)
+        """从记录中释放图片引用，但不在这里直接删除缓存文件。
+
+        一张缓存图可能同时被正式记录、多个被 @ 对象的记录和待发提醒引用。若某一
+        条提醒先送达，直接 unlink 会让仍在保留窗口内的正式记录变成破图。记录一旦
+        不再需要图片，先把引用换成过期占位；下一轮维护会全量收集仍被引用的路径，
+        再安全回收没有引用的孤儿文件。``delete_files`` 保留是为了兼容旧调用方。
+        """
+        record.pop("image_cache", None)
         # 关键：光 pop image_cache 是不够的，images/image 里的引用和历史 base64
         # 原文也必须一起释放，否则清理只清了一半，库还是会越来越大。
-        self._drop_record_image_refs(record, delete_files)
+        # 不可直接删文件：缓存路径可能仍被其他 KV 记录复用，交给孤儿巡检统一回收。
+        self._drop_record_image_refs(record, delete_files=False)
 
         quote = record.get("quote")
         if isinstance(quote, dict):
-            cache = quote.pop("image_cache", None)
-            if delete_files:
-                self._delete_image_cache_entries(cache)
+            quote.pop("image_cache", None)
 
         media = record.get("media")
         if isinstance(media, list):
             for item in media:
                 if not isinstance(item, dict):
                     continue
-                cache = item.pop("cover_cache", None)
-                if delete_files:
-                    self._delete_image_cache_entries([cache] if isinstance(cache, dict) else cache)
+                item.pop("cover_cache", None)
 
         for key in ("before", "after"):
             items = record.get(key)
@@ -1033,7 +1040,7 @@ class DataMixin:
                 continue
             for item in items:
                 if isinstance(item, dict):
-                    self._drop_record_image_cache(item, delete_files=delete_files)
+                    self._drop_record_image_cache(item, delete_files=False)
 
     def _drop_records_image_cache(self, records: Any, delete_files: bool) -> None:
         if not isinstance(records, list):
@@ -1467,10 +1474,25 @@ class DataMixin:
         config = await self.get_kv_data(self._reminder_context_key(group_id), {})
         if not isinstance(config, dict):
             config = {}
+        limit = self._max_reminder_context()
+
+        def bounded(name: str, default: int) -> int:
+            try:
+                value = int(config.get(name, default))
+            except (TypeError, ValueError):
+                value = default
+            return min(max(value, 0), limit)
+
         return {
             "enabled": bool(config.get("enabled", self._config_bool("reminder", "default_context_enabled", default=False))),
-            "before": min(int(config.get("before", self._config_int("reminder", "default_context_before", default=1))), self._max_reminder_context()),
-            "after": min(int(config.get("after", self._config_int("reminder", "default_context_after", default=1))), self._max_reminder_context()),
+            "before": bounded(
+                "before",
+                self._config_int("reminder", "default_context_before", default=1),
+            ),
+            "after": bounded(
+                "after",
+                self._config_int("reminder", "default_context_after", default=1),
+            ),
         }
 
     async def _set_reminder_context(
@@ -1744,25 +1766,58 @@ class DataMixin:
             return None
 
     async def _call_onebot_action(self, event: AstrMessageEvent, action: str, **kwargs) -> Any:
+        """调用 OneBot API，兼容 aiocqhttp 与常见 bot.call_api 封装。"""
+        import inspect
+
         bot = getattr(event, "bot", None)
-        caller = getattr(bot, "call_action", None)
-        if not callable(caller):
+        owners = [bot, getattr(bot, "api", None), getattr(bot, "client", None)]
+        callers: list[Any] = []
+        seen: set[int] = set()
+        for owner in owners:
+            if owner is None or id(owner) in seen:
+                continue
+            seen.add(id(owner))
+            for name in ("call_action", "call_api"):
+                caller = getattr(owner, name, None)
+                if callable(caller) and id(caller) not in seen:
+                    seen.add(id(caller))
+                    callers.append(caller)
+        if not callers:
             return None
 
+        base_kwargs = dict(kwargs)
         self_id = self._self_id(event)
-        if self_id and "self_id" not in kwargs:
-            kwargs["self_id"] = self_id
+        if self_id and "self_id" not in base_kwargs:
+            base_kwargs["self_id"] = self_id
+        variants = [base_kwargs]
+        if "self_id" in base_kwargs:
+            variants.append({key: value for key, value in base_kwargs.items() if key != "self_id"})
 
-        try:
-            return await caller(action, **kwargs)
-        except TypeError:
-            kwargs.pop("self_id", None)
-            try:
-                return await caller(action, **kwargs)
-            except Exception as exc:
-                logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {exc}")
-        except Exception as exc:
-            logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {exc}")
+        last_error: Exception | None = None
+        for caller in callers:
+            caller_hard_failed = False
+            for payload in variants:
+                for keyword_action in (False, True):
+                    try:
+                        result = (
+                            caller(action=action, **payload)
+                            if keyword_action
+                            else caller(action, **payload)
+                        )
+                        if inspect.isawaitable(result):
+                            result = await result
+                        return result
+                    except TypeError as exc:
+                        last_error = exc
+                        continue
+                    except Exception as exc:
+                        last_error = exc
+                        caller_hard_failed = True
+                        break
+                if caller_hard_failed:
+                    break
+        if last_error:
+            logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {last_error}")
         return None
 
     def _name_from_mapping(self, value: Any, keys: list[str]) -> str:
@@ -1793,7 +1848,22 @@ class DataMixin:
                     return str(self_id)
             except Exception:
                 pass
-        return str(getattr(event.message_obj, "self_id", "") or "")
+        message_obj = getattr(event, "message_obj", None)
+        value = (
+            getattr(message_obj, "self_id", "")
+            or getattr(message_obj, "selfId", "")
+            or getattr(message_obj, "bot_id", "")
+            or getattr(message_obj, "botId", "")
+        )
+        if value:
+            return str(value)
+        raw_mappings = getattr(self, "_raw_event_mappings", None)
+        if callable(raw_mappings):
+            for raw in raw_mappings(event):
+                value = self._first_mapping_value(raw, ["self_id", "selfId", "bot_id", "botId"])
+                if value:
+                    return str(value)
+        return ""
 
     def _platform_id(self, event: AstrMessageEvent) -> str:
         if hasattr(event, "get_platform_id"):

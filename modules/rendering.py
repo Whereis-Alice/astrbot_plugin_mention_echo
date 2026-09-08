@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import re
 import shutil
 import time
@@ -266,13 +267,20 @@ class RenderingMixin:
                 }
             )
 
-        sent = await self._try_onebot_action(
+        payload = {
+            "group_id": self._numeric_id(group_id),
+            "messages": nodes,
+        }
+        # OneBot 11 标准扩展名和 LLBot 都常见；不同实现只实现其中一个，
+        # 因此先走群专用动作，再回退到标准的通用转发动作。
+        if await self._try_onebot_action(event, "send_group_forward_msg", **payload):
+            return True
+        if await self._try_onebot_action(
             event,
-            "send_group_forward_msg",
-            group_id=self._numeric_id(group_id),
-            messages=nodes,
-        )
-        if sent:
+            "send_forward_msg",
+            **payload,
+            message_type="group",
+        ):
             return True
 
         logger.warning("[艾特回声] 合并转发发送失败，回退到普通图片发送")
@@ -280,30 +288,52 @@ class RenderingMixin:
 
     async def _try_onebot_action(self, event: AstrMessageEvent, action: str, **kwargs: Any) -> bool:
         bot = getattr(event, "bot", None)
-        caller = getattr(bot, "call_action", None)
-        if not callable(caller):
+        owners = [bot, getattr(bot, "api", None), getattr(bot, "client", None)]
+        callers = []
+        seen: set[int] = set()
+        for owner in owners:
+            if owner is None or id(owner) in seen:
+                continue
+            seen.add(id(owner))
+            for name in ("call_action", "call_api"):
+                caller = getattr(owner, name, None)
+                if callable(caller) and id(caller) not in seen:
+                    seen.add(id(caller))
+                    callers.append(caller)
+        if not callers:
             return False
 
+        base_kwargs = dict(kwargs)
         self_id = self._self_id(event)
-        if self_id and "self_id" not in kwargs:
-            kwargs["self_id"] = self_id
+        if self_id and "self_id" not in base_kwargs:
+            base_kwargs["self_id"] = self_id
+        variants = [base_kwargs]
+        if "self_id" in base_kwargs:
+            variants.append({key: value for key, value in base_kwargs.items() if key != "self_id"})
 
-        try:
-            await caller(action, **kwargs)
-            return True
-        except TypeError:
-            kwargs.pop("self_id", None)
-            try:
-                await caller(action, **kwargs)
-                return True
-            except Exception as exc:
-                if self._assume_sent_on_timeout(exc, f"调用协议端 API {action}"):
-                    return True
-                logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {exc}")
-        except Exception as exc:
-            if self._assume_sent_on_timeout(exc, f"调用协议端 API {action}"):
-                return True
-            logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {exc}")
+        last_error: Exception | None = None
+        for caller in callers:
+            caller_hard_failed = False
+            for payload in variants:
+                for keyword_action in (False, True):
+                    try:
+                        result = caller(action=action, **payload) if keyword_action else caller(action, **payload)
+                        if inspect.isawaitable(result):
+                            await result
+                        return True
+                    except TypeError as exc:
+                        last_error = exc
+                        continue
+                    except Exception as exc:
+                        last_error = exc
+                        if self._assume_sent_on_timeout(exc, f"调用协议端 API {action}"):
+                            return True
+                        caller_hard_failed = True
+                        break
+                if caller_hard_failed:
+                    break
+        if last_error:
+            logger.debug(f"[艾特回声] 调用协议端 API {action} 失败: {last_error}")
         return False
 
     def _image_component(self, image_path: str) -> Any:

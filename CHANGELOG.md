@@ -7,6 +7,46 @@
 
 ## [Unreleased]
 
+## [v1.3.0] - 2026-09-08
+
+主题：**让“补课上下文”真的能存下来，查询不再刷屏。**
+
+### 修复
+
+- **修复“明明开了上下文，查询却没有上下文”的配置陷阱。**
+  `提醒截图上下文` 原本只作用于回群提醒队列，和手动 `谁艾特我` 的记录完全独立；
+  `查询时是否连带艾特前后的群聊记录 = 始终展示` 原本也只改变显示，并不会保存任何内容。
+  现在选择 `始终展示` 后，插件会从设置生效后的新消息开始自动采集查询上下文并在查询图中展示。
+  旧记录没有当时的群消息，无法逆向补齐，这是数据边界而不是渲染问题。
+- **修复一次艾特被解析两次。** 上下文开启时，同一消息曾先为前后文解析一次、再为正式记录解析一次，
+  导致重复的 `record image diagnostic` 日志，也可能重复做图片解析工作。现在正式记录复用第一次结果，
+  同时保持前文缓存不被改写。
+- **查询成功只发结果图片。** 移除等待提示和“最近几次 / 共多少条”的长文字摘要，避免群里刷屏；
+  只有出图失败时才走合并转发纯文本兜底。
+- **图片诊断日志默认关闭。** `record image diagnostic` / `query image diagnostic` 改为由
+  `feature.image_diagnostics_enabled` 控制，默认 `false`；排查图片问题时才需要临时开启。
+- **提醒上下文异常配置不再中断记录。** 前后文条数写成空值、文字或负数时会安全回落并夹取到允许范围。
+- **普通上下文消息不再无条件落原图文件。** 只有正式艾特记录或正在补充已记录艾特后文的消息才会保留本地原图；
+  其余滚动前文只保留 URL / 过期占位，避免开启上下文后被日常群聊图片占满缓存。
+- **修复共享缓存图被提前删除。** 正式记录、多个被 @ 对象和待发提醒可以安全共用同一个图片引用；
+  其中一条被清理或提醒送达时只会断开自己的引用，未被任何记录使用的文件改由自动巡检回收。
+- **缓存过期不再静默缺图。** `mecache://` 指向的文件已被保留期或配额巡检删除时，出图前会自动变为
+  “图片已过期”占位，而不是在截图里悄悄少掉一张图。
+
+### 兼容性
+
+- 补齐标准 OneBot v11、LLOneBot / LLBot 的 `at`、`image`、群/用户/机器人 ID 与合并转发动作兼容。
+- 支持 SnowLuma 一类以 JSON 字符串传递 `messageChain`、使用 `mention_user` / `imageUrl` /
+  `senderId` / `botId` 的事件形态。
+- OneBot API 调用兼容 `bot`、`bot.api`、`bot.client` 上的同步或异步 `call_action` / `call_api`，
+  以及只接受关键字 `action` 的实现；多页图片转发会从 `send_group_forward_msg` 回退到
+  `send_forward_msg`。
+
+### 测试
+
+- 新增 OneBot 协议兼容自测，覆盖上述消息段、同步关键字 API 和通用转发回退；CI 已接入。
+- 查询自测新增“只解析一次”和“成功时只发图”回归用例。
+
 ## [v1.2.0] - 2026-09-06
 
 主题：**两条查询命令合并成一条**。
@@ -144,7 +184,8 @@ v1.0.4 重构而来，独立命名空间，可与原插件共存于同一目录�
 - 权限门禁收紧：破坏性命令（`清除全部艾特数据` / `艾特清理`）要求机器人管理员，
   群级配置命令要求群管理员，只读命令不设门禁。
 
-[Unreleased]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/compare/v1.3.0...HEAD
+[v1.3.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.3.0
 [v1.2.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.2.0
 [v1.1.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/Whereis-Alice/astrbot_plugin_mention_echo/releases/tag/v1.0.0

@@ -37,3 +37,6 @@ jobs:
 
       - name: Run query tests
         run: python tests/test_query.py
+
+      - name: Run OneBot compatibility tests
+        run: python tests/test_onebot_compat.py

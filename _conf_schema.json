@@ -26,6 +26,12 @@
         "type": "bool",
         "default": false,
         "hint": "默认关闭。开启后会向大模型注册一个函数工具，用户用自然语言问「刚才谁叫我」时，模型可以自己调用并读取该用户在本群的最近艾特记录（纯文字，最多 20 条）。开启即意味着这些聊天内容会随对话发给你配置的模型服务商，请自行评估隐私。修改后需要重载插件生效。"
+      },
+      "image_diagnostics_enabled": {
+        "description": "输出图片解析诊断日志",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。开启后才会输出「record image diagnostic」和「query image diagnostic」等逐条排障日志；只在排查图片丢失、OneBot 消息段兼容性问题时临时打开，用完关闭即可。"
       }
     }
   },
@@ -67,7 +73,7 @@
         "description": "查询上下文最多缓存消息条数",
         "type": "int",
         "default": 5,
-        "hint": "原版默认前后各 5 条。"
+        "hint": "每次艾特最多保留前文 N 条、后文 N 条；最小 1。上下文只会从开关启用后的新消息开始采集，不能从历史记录中补回。"
       },
       "query_context_mode": {
         "description": "查询时是否连带艾特前后的群聊记录",
@@ -78,13 +84,13 @@
           "始终展示",
           "从不展示"
         ],
-        "hint": "跟随群设置=只有群里发过「开启艾特上下文」的群才展示（默认）；始终展示=只要记录里存了上下文就一并展示，适合久不看群补课；从不展示=只看被艾特那一条，出图最小。"
+        "hint": "跟随群设置=只有群里发过「开启艾特上下文」的群才采集并展示（默认）；始终展示=从本项启用后自动为新艾特采集并展示上下文，适合久不看群补课；从不展示=不采集且只看被艾特那一条，最省空间。历史记录无法凭空补录上下文；本项不改变回群提醒的上下文设置。"
       },
       "query_recent_count": {
         "description": "查询默认只看最近多少次艾特",
         "type": "int",
         "default": 0,
-        "hint": "0=全部记录，多了自动分页；填 3 就是每次只看最近 3 次艾特，并在结果上方附一行「最近一次是多久以前」。命令里带数字可临时覆盖，例如「谁艾特我 5」。"
+        "hint": "0=全部记录，多了自动分页；填 3 就是每次只看最近 3 次艾特。查询渲染成功时只发送结果图片，不额外发送等待提示或文字摘要。命令里带数字可临时覆盖，例如「谁艾特我 5」。"
       },
       "query_sort_order": {
         "description": "查询结果排序方式",
@@ -160,17 +166,19 @@
         "description": "默认开启提醒截图上下文",
         "type": "bool",
         "default": false,
-        "hint": "开启后提醒截图可展示艾特前后消息。"
+        "hint": "开启后，被动回群提醒的截图可展示艾特前后消息；前提是本群提醒和目标用户提醒本身已开启。它只影响提醒队列，不会让「谁艾特我」自动保存查询上下文。主动查询请使用 record 里的查询上下文设置。"
       },
       "default_context_before": {
         "description": "默认提醒截图前文条数",
         "type": "int",
-        "default": 1
+        "default": 1,
+        "hint": "提醒上下文开启时，在被艾特消息之前最多保留几条；0 表示不保留前文，最大值由「提醒上下文最大条数」限制。"
       },
       "default_context_after": {
         "description": "默认提醒截图后文条数",
         "type": "int",
-        "default": 1
+        "default": 1,
+        "hint": "提醒上下文开启时，在被艾特消息之后最多保留几条；0 表示不保留后文，最大值由「提醒上下文最大条数」限制。"
       },
       "max_context_messages": {
         "description": "提醒上下文最大条数",
@@ -310,12 +318,6 @@
     "description": "提示文案配置",
     "type": "object",
     "items": {
-      "waiting_text_template": {
-        "description": "查询等待提示模板",
-        "type": "string",
-        "default": "让{bot_name}看看谁艾特过你哦，稍等一下~",
-        "hint": "可用变量：{bot_name}、{target_name}、{target_pronoun}；留空则不发送查询等待提示；查询别人且使用默认模板时会自动显示 ta。"
-      },
       "reminder_text_template": {
         "description": "回群提醒提示模板",
         "type": "string",

@@ -152,11 +152,13 @@ def test_sweep_images() -> None:
     print("_sweep_images_sync")
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
-        expired_mtime = write(root / "20260906" / "msg_expired.jpg", 100, 48 * HOUR)
-        expired_dir = write(root / "20250101" / "msg_olddir.jpg", 100, 1 * HOUR)
-        orphan = write(root / "20260906" / "msg_orphan.jpg", 100, 2 * HOUR)
-        referenced = write(root / "20260906" / "msg_kept.jpg", 100, 2 * HOUR)
-        just_saved = write(root / "20260906" / "msg_inflight.jpg", 100, 30)
+        current_dir = time.strftime("%Y%m%d", time.localtime(NOW))
+        expired_dir_name = time.strftime("%Y%m%d", time.localtime(NOW - 3 * DAY))
+        expired_mtime = write(root / current_dir / "msg_expired.jpg", 100, 48 * HOUR)
+        expired_dir = write(root / expired_dir_name / "msg_olddir.jpg", 100, 1 * HOUR)
+        orphan = write(root / current_dir / "msg_orphan.jpg", 100, 2 * HOUR)
+        referenced = write(root / current_dir / "msg_kept.jpg", 100, 2 * HOUR)
+        just_saved = write(root / current_dir / "msg_inflight.jpg", 100, 30)
 
         stats = _sweep_images_sync(
             root,
